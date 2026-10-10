@@ -65,7 +65,7 @@ object RequestBroker {
         pending.future.complete(response)
     }
 
-    fun dismissNotification(ctx: Context) {
+    private fun dismissNotification(ctx: Context) {
         ctx.getSystemService(NotificationManager::class.java).cancel(NOTIFICATION_ID)
     }
 

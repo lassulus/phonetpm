@@ -89,8 +89,10 @@ class ApprovalActivity : FragmentActivity() {
 
     override fun onResume() {
         super.onResume()
+        // The request notification stays until RequestBroker.submit resolves the
+        // request: cancelling it here (the activity is often launched right after
+        // it is posted) would silence its sound and vibration.
         RequestBroker.activityVisible = true
-        RequestBroker.dismissNotification(this)
     }
 
     override fun onPause() {
