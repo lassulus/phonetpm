@@ -1,7 +1,7 @@
 //! iroh transport to the phone: one bi-stream per request, lazily connected,
 //! connection reused and re-established once on failure.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
 use iroh::endpoint::{presets, Connection};
@@ -27,15 +27,30 @@ pub struct Phone {
     endpoint: Endpoint,
     id: EndpointId,
     conn: Mutex<Option<Connection>>,
+    last_request: std::sync::Mutex<Instant>,
 }
 
 impl Phone {
     pub fn new(endpoint: Endpoint, id: EndpointId) -> Self {
-        Self { endpoint, id, conn: Mutex::new(None) }
+        Self {
+            endpoint,
+            id,
+            conn: Mutex::new(None),
+            last_request: std::sync::Mutex::new(Instant::now()),
+        }
     }
 
     pub fn endpoint(&self) -> &Endpoint {
         &self.endpoint
+    }
+
+    /// Time since the last request started or finished (or since creation).
+    pub fn idle_for(&self) -> Duration {
+        self.last_request.lock().expect("not poisoned").elapsed()
+    }
+
+    fn touch(&self) {
+        *self.last_request.lock().expect("not poisoned") = Instant::now();
     }
 
     async fn connect(&self) -> Result<Connection> {
@@ -50,6 +65,13 @@ impl Phone {
     /// Sends one request; on transport failure drops the cached connection and
     /// retries exactly once on a fresh one.
     pub async fn request(&self, req: &Request) -> Result<Response> {
+        self.touch();
+        let resp = self.request_inner(req).await;
+        self.touch();
+        resp
+    }
+
+    async fn request_inner(&self, req: &Request) -> Result<Response> {
         let frame = proto::encode(req)?;
         let mut guard = self.conn.lock().await;
         let mut fresh = false;

@@ -1,5 +1,6 @@
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{anyhow, bail, Context, Result};
 use base64::prelude::{Engine, BASE64_STANDARD};
@@ -44,7 +45,10 @@ fn main() -> Result<()> {
         .init();
     match Cli::parse().cmd {
         Cmd::Pair { phone } => runtime()?.block_on(pair(phone)),
-        Cmd::Daemon => runtime()?.block_on(daemon()),
+        Cmd::Daemon => {
+            let activated = activated_sockets()?;
+            runtime()?.block_on(daemon(activated))
+        }
         Cmd::Keys => keys(),
         Cmd::Identity { key } => identity(&key),
     }
@@ -111,7 +115,84 @@ fn bind_socket(path: &Path) -> Result<UnixListener> {
     Ok(listener)
 }
 
-async fn daemon() -> Result<()> {
+struct Activated {
+    agent: std::os::unix::net::UnixListener,
+    control: std::os::unix::net::UnixListener,
+}
+
+/// Sockets passed by systemd socket activation (`sd_listen_fds_with_names`),
+/// matched by `FileDescriptorName=agent` / `control` or else by socket file
+/// name (`agent.sock` / `control.sock`). `Ok(None)` when the daemon was not
+/// socket-activated. Call before starting the runtime: it edits the
+/// environment.
+fn activated_sockets() -> Result<Option<Activated>> {
+    use std::os::fd::FromRawFd;
+    const SD_LISTEN_FDS_START: i32 = 3;
+    let Ok(pid) = std::env::var("LISTEN_PID") else {
+        return Ok(None);
+    };
+    if pid.parse::<u32>().ok() != Some(std::process::id()) {
+        return Ok(None);
+    }
+    let count: i32 = std::env::var("LISTEN_FDS")
+        .context("LISTEN_PID set without LISTEN_FDS")?
+        .parse()
+        .context("parsing LISTEN_FDS")?;
+    let names = std::env::var("LISTEN_FDNAMES").unwrap_or_default();
+    let names: Vec<&str> = names.split(':').collect();
+    // Not inherited by anything we might spawn.
+    for var in ["LISTEN_PID", "LISTEN_FDS", "LISTEN_FDNAMES"] {
+        std::env::remove_var(var);
+    }
+    let (mut agent, mut control) = (None, None);
+    for i in 0..count {
+        let fd = SD_LISTEN_FDS_START + i;
+        // SAFETY: fds 3..3+LISTEN_FDS are handed to this process by systemd and
+        // owned by nobody else; each is wrapped exactly once.
+        let listener = unsafe { std::os::unix::net::UnixListener::from_raw_fd(fd) };
+        // SAFETY: fd is a valid open descriptor (see above).
+        unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
+        // FileDescriptorName= names every fd of a socket unit alike, so with a
+        // single unit fall back to the file name the socket is bound to.
+        let path = listener.local_addr().ok().and_then(|a| a.as_pathname().map(Path::to_owned));
+        let file = path.as_deref().and_then(Path::file_name).and_then(|f| f.to_str());
+        let slot = match (names.get(i as usize).copied(), file) {
+            (Some("agent"), _) => &mut agent,
+            (Some("control"), _) => &mut control,
+            (_, Some(config::AGENT_SOCK)) => &mut agent,
+            (_, Some(config::CONTROL_SOCK)) => &mut control,
+            (name, _) => bail!(
+                "socket-activated fd {fd} ({name:?}, {path:?}) is neither \
+                 FileDescriptorName=agent/control nor {}/{}",
+                config::AGENT_SOCK,
+                config::CONTROL_SOCK
+            ),
+        };
+        listener.set_nonblocking(true)?;
+        *slot = Some(listener);
+    }
+    match (agent, control) {
+        (Some(agent), Some(control)) => Ok(Some(Activated { agent, control })),
+        _ => bail!("socket activation needs both an agent and a control socket"),
+    }
+}
+
+/// When socket-activated, exit after this long without a phone request;
+/// systemd starts the daemon again on the next connection.
+const IDLE_EXIT: Duration = Duration::from_secs(10 * 60);
+
+async fn idle_exit(phone: &Phone) {
+    loop {
+        let idle = phone.idle_for();
+        if idle >= IDLE_EXIT {
+            return;
+        }
+        tokio::time::sleep(IDLE_EXIT - idle).await;
+    }
+}
+
+async fn daemon(activated: Option<Activated>) -> Result<()> {
+    let socket_activated = activated.is_some();
     let cfg = config::load_config()?;
     let phone_id = cfg.phone_id()?;
     let secret = config::load_secret()?;
@@ -119,12 +200,25 @@ async fn daemon() -> Result<()> {
     info!(host = %endpoint.id(), phone = %phone_id, "endpoint bound");
     let phone = Arc::new(Phone::new(endpoint, phone_id));
 
-    let dir = config::ensure_runtime_dir()?;
-    let agent_path = dir.join(config::AGENT_SOCK);
-    let control_path = dir.join(config::CONTROL_SOCK);
-    let agent_listener = bind_socket(&agent_path)?;
-    let control_listener = bind_socket(&control_path)?;
-    info!(agent = %agent_path.display(), control = %control_path.display(), "listening");
+    // Socket files we created ourselves and must remove on exit; systemd owns
+    // the activated ones.
+    let mut owned_paths = Vec::new();
+    let (agent_listener, control_listener) = match activated {
+        Some(Activated { agent, control }) => {
+            info!("using sockets from systemd socket activation");
+            (UnixListener::from_std(agent)?, UnixListener::from_std(control)?)
+        }
+        None => {
+            let dir = config::ensure_runtime_dir()?;
+            let agent_path = dir.join(config::AGENT_SOCK);
+            let control_path = dir.join(config::CONTROL_SOCK);
+            let agent_listener = bind_socket(&agent_path)?;
+            let control_listener = bind_socket(&control_path)?;
+            info!(agent = %agent_path.display(), control = %control_path.display(), "listening");
+            owned_paths = vec![agent_path, control_path];
+            (agent_listener, control_listener)
+        }
+    };
 
     let agent = Arc::new(Agent::new(phone.clone()));
     let agent_task = tokio::spawn(sshagent::serve(agent_listener, agent));
@@ -134,11 +228,13 @@ async fn daemon() -> Result<()> {
     tokio::select! {
         _ = tokio::signal::ctrl_c() => info!("SIGINT received"),
         _ = sigterm.recv() => info!("SIGTERM received"),
+        _ = idle_exit(&phone), if socket_activated => info!("idle; exiting until the next connection"),
         r = agent_task => error!("agent listener stopped: {r:?}"),
         r = control_task => error!("control listener stopped: {r:?}"),
     }
-    let _ = std::fs::remove_file(&agent_path);
-    let _ = std::fs::remove_file(&control_path);
+    for path in &owned_paths {
+        let _ = std::fs::remove_file(path);
+    }
     phone.endpoint().close().await;
     Ok(())
 }

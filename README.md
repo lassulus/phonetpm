@@ -57,6 +57,51 @@ age -d -i phone.txt secret.age               # fingerprint on the phone
 `age-plugin-phone` must be on `PATH`; it talks to the daemon via
 `$XDG_RUNTIME_DIR/phonetpm/control.sock` (override with `PHONETPM_SOCK`).
 
+### systemd socket activation
+
+Instead of starting the daemon by hand, let systemd own the sockets and start
+`phonetpm daemon` on the first connection. A socket-activated daemon exits
+after 10 minutes without a request; the next connection starts it again.
+
+`~/.config/systemd/user/phonetpm.socket`:
+
+```ini
+[Unit]
+Description=phonetpm ssh-agent and control sockets
+
+[Socket]
+ListenStream=%t/phonetpm/agent.sock
+ListenStream=%t/phonetpm/control.sock
+SocketMode=0600
+DirectoryMode=0700
+
+[Install]
+WantedBy=sockets.target
+```
+
+`~/.config/systemd/user/phonetpm.service`:
+
+```ini
+[Unit]
+Description=phonetpm daemon
+Requires=phonetpm.socket
+
+[Service]
+ExecStart=/path/to/phonetpm daemon
+```
+
+```sh
+systemctl --user daemon-reload
+systemctl --user enable --now phonetpm.socket
+```
+
+The daemon tells the sockets apart by their file names (`agent.sock`,
+`control.sock`). For other paths, name them with `FileDescriptorName=agent`
+and `FileDescriptorName=control`. That setting applies to every socket in a
+unit, so it needs two socket units (e.g. `phonetpm-agent.socket` and
+`phonetpm-control.socket`, both with `Service=phonetpm.service`, listed in the
+service's `Sockets=`).
+
 ## Security model
 
 - Private keys never leave the Keystore. SSH keys are per-operation
