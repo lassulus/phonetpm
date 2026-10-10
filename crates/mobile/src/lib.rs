@@ -34,7 +34,7 @@ pub enum Request {
     Pair { host_name: String },
     ListKeys,
     Sign { key_id: String, data: Vec<u8> },
-    Ecdh { key_id: String, peer_public_key: Vec<u8> },
+    Ecdh { key_id: String, peer_public_key: Vec<u8>, description: Option<String> },
     PushEndpoint,
 }
 
@@ -59,8 +59,8 @@ impl From<proto::Request> for Request {
             proto::Request::Pair { host_name } => Request::Pair { host_name },
             proto::Request::ListKeys => Request::ListKeys,
             proto::Request::Sign { key_id, data } => Request::Sign { key_id, data },
-            proto::Request::Ecdh { key_id, peer_public_key } => {
-                Request::Ecdh { key_id, peer_public_key }
+            proto::Request::Ecdh { key_id, peer_public_key, description } => {
+                Request::Ecdh { key_id, peer_public_key, description }
             }
             proto::Request::PushEndpoint => Request::PushEndpoint,
         }

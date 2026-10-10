@@ -136,8 +136,9 @@ class ApprovalActivity : FragmentActivity() {
             }
         }
         val info = BiometricPrompt.PromptInfo.Builder()
-            .setTitle(if (pending.request is Request.Sign) "SSH signature" else "age decrypt")
-            .setSubtitle("${meta.label} — ${pending.hostName}")
+            .setTitle(pending.action ?: return)
+            .setSubtitle("Key ${meta.label} — ${pending.hostName}")
+            .apply { pending.description?.let(::setDescription) }
             .setNegativeButtonText("Cancel")
             .setAllowedAuthenticators(BIOMETRIC_STRONG)
             .setConfirmationRequired(false)
@@ -220,12 +221,17 @@ private fun ApprovalScreen(
                 }
             }
             is Request.Sign, is Request.Ecdh -> {
-                Text(
-                    if (r is Request.Sign) "SSH signature" else "age decrypt",
-                    style = MaterialTheme.typography.headlineSmall,
-                )
+                Text(pending.action.orEmpty(), style = MaterialTheme.typography.headlineSmall)
                 Spacer(Modifier.height(8.dp))
                 Text(pending.hostName, style = MaterialTheme.typography.bodyLarge)
+                Spacer(Modifier.height(16.dp))
+                Text("Key", style = MaterialTheme.typography.labelMedium)
+                Text(pending.keyLabel.orEmpty(), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+                pending.description?.let {
+                    Spacer(Modifier.height(16.dp))
+                    Text("Description", style = MaterialTheme.typography.labelMedium)
+                    Text(it, style = MaterialTheme.typography.bodyLarge)
+                }
                 Spacer(Modifier.height(24.dp))
                 CircularProgressIndicator()
                 Spacer(Modifier.height(24.dp))

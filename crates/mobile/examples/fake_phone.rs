@@ -72,7 +72,7 @@ impl Handler for FakePhone {
                 Some(_) => Response::Error { message: "not a signing key".into() },
                 None => Response::UnknownKey,
             },
-            Request::Ecdh { key_id, peer_public_key } => match self.key(&key_id) {
+            Request::Ecdh { key_id, peer_public_key, .. } => match self.key(&key_id) {
                 Some(k) if k.info.kind == KeyKind::Age => {
                     let peer = match PublicKey::from_public_key_der(&peer_public_key) {
                         Ok(p) => p,

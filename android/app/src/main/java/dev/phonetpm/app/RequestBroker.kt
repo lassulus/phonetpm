@@ -27,8 +27,22 @@ class PendingRequest(
     /** Paired host name, or the name the peer claims while pairing. */
     val hostName: String,
     val request: Request,
+    /** Label of the requested key; `null` for pairing or an unknown key. */
+    val keyLabel: String?,
 ) {
     internal val future = CompletableFuture<Response>()
+
+    /** "SSH signature" / "age decrypt" for key operations, else `null`. */
+    val action: String?
+        get() = when (request) {
+            is Request.Sign -> "SSH signature"
+            is Request.Ecdh -> "age decrypt"
+            else -> null
+        }
+
+    /** Free text the requester attached (only unlock requests carry one). */
+    val description: String?
+        get() = (request as? Request.Ecdh)?.description
 }
 
 /**
@@ -52,12 +66,21 @@ object RequestBroker {
 
     /** Blocks the calling (Rust worker) thread until the user answers or the request times out. */
     fun submit(ctx: Context, peerId: String, hostName: String, request: Request): Response {
-        val pending = PendingRequest(seq.incrementAndGet(), peerId, hostName, request)
+        val app = App.of(ctx)
+        val keyId = when (request) {
+            is Request.Sign -> request.keyId
+            is Request.Ecdh -> request.keyId
+            else -> null
+        }
+        val keyLabel = keyId?.let { app.keys.find(it)?.label ?: it }
+        val pending = PendingRequest(seq.incrementAndGet(), peerId, hostName, request, keyLabel)
         _queue.update { it + pending }
         present(ctx, pending)
-        return try {
+        var timedOut = false
+        val response = try {
             pending.future.get(TIMEOUT_SECONDS, TimeUnit.SECONDS)
         } catch (_: TimeoutException) {
+            timedOut = true
             Response.Denied
         } catch (_: InterruptedException) {
             Response.Denied
@@ -66,6 +89,28 @@ object RequestBroker {
             _queue.update { it - pending }
             if (_queue.value.isEmpty()) clearAlert(ctx)
         }
+        record(app, pending, if (timedOut) Outcome.TimedOut else outcomeOf(response))
+        return response
+    }
+
+    private fun outcomeOf(response: Response): Outcome = when (response) {
+        is Response.Signature, is Response.SharedSecret -> Outcome.Approved
+        Response.Denied -> Outcome.Denied
+        else -> Outcome.Failed
+    }
+
+    private fun record(app: App, pending: PendingRequest, outcome: Outcome) {
+        val action = pending.action ?: return
+        app.history.record(
+            HistoryEntry(
+                at = System.currentTimeMillis(),
+                hostName = pending.hostName,
+                action = action,
+                keyLabel = pending.keyLabel.orEmpty(),
+                description = pending.description,
+                outcome = outcome,
+            )
+        )
     }
 
     fun complete(pending: PendingRequest, response: Response) {
@@ -103,16 +148,18 @@ object RequestBroker {
         )
         val text = when (pending.request) {
             is Request.Pair -> ctx.getString(R.string.notif_request_pair, pending.hostName)
-            is Request.Sign -> ctx.getString(R.string.notif_request_sign, pending.hostName)
-            is Request.Ecdh -> ctx.getString(R.string.notif_request_ecdh, pending.hostName)
+            is Request.Sign -> ctx.getString(R.string.notif_request_sign, pending.keyLabel, pending.hostName)
+            is Request.Ecdh -> ctx.getString(R.string.notif_request_ecdh, pending.keyLabel, pending.hostName)
             Request.ListKeys, Request.PushEndpoint -> return
         }
+        val details = listOfNotNull(text, pending.description).joinToString("\n")
         // Background activity starts are blocked on modern Android; the
         // full-screen intent is what reliably brings the approval UI up.
         val notification = Notification.Builder(ctx, App.CHANNEL_REQUESTS)
             .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle(ctx.getString(R.string.notif_request_title))
             .setContentText(text)
+            .setStyle(Notification.BigTextStyle().bigText(details))
             .setCategory(Notification.CATEGORY_CALL)
             .setContentIntent(pi)
             .setFullScreenIntent(pi, true)

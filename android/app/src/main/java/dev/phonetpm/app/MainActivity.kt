@@ -29,6 +29,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.DateRange
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Person
@@ -102,7 +103,7 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-private enum class Tab(val label: String) { Home("Home"), Keys("Keys"), Hosts("Hosts") }
+private enum class Tab(val label: String) { Home("Home"), Keys("Keys"), Hosts("Hosts"), History("History") }
 
 @Composable
 private fun MainScreen(app: App) {
@@ -126,6 +127,7 @@ private fun MainScreen(app: App) {
                                     Tab.Home -> Icons.Default.Home
                                     Tab.Keys -> Icons.Default.Lock
                                     Tab.Hosts -> Icons.Default.Person
+                                    Tab.History -> Icons.Default.DateRange
                                 },
                                 contentDescription = t.label,
                             )
@@ -147,6 +149,7 @@ private fun MainScreen(app: App) {
                 Tab.Home -> HomeTab(app)
                 Tab.Keys -> KeysTab(app, snackbar)
                 Tab.Hosts -> HostsTab(app)
+                Tab.History -> HistoryTab(app)
             }
         }
     }
@@ -376,5 +379,43 @@ private fun HostsTab(app: App) {
             },
             dismissButton = { TextButton(onClick = { toRemove = null }) { Text("Cancel") } },
         )
+    }
+}
+
+@Composable
+private fun HistoryTab(app: App) {
+    val entries by app.history.all.collectAsStateWithLifecycle()
+    val dateFormat = remember { DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.MEDIUM) }
+
+    if (entries.isEmpty()) {
+        Text(
+            "No requests yet.",
+            modifier = Modifier.padding(16.dp),
+            style = MaterialTheme.typography.bodyMedium,
+        )
+        return
+    }
+    Row(Modifier.fillMaxWidth().padding(horizontal = 8.dp), horizontalArrangement = Arrangement.End) {
+        TextButton(onClick = { app.history.clear() }) { Text("Clear") }
+    }
+    LazyColumn(Modifier.fillMaxSize()) {
+        items(entries) { e ->
+            Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
+                Text(
+                    "${e.action} — ${e.outcome.label}",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Medium,
+                    color = if (e.outcome == Outcome.Approved) {
+                        MaterialTheme.colorScheme.onSurface
+                    } else {
+                        MaterialTheme.colorScheme.error
+                    },
+                )
+                Text("Key ${e.keyLabel} · ${e.hostName}", style = MaterialTheme.typography.bodyMedium)
+                e.description?.let { Text(it, style = MaterialTheme.typography.bodyMedium) }
+                Text(dateFormat.format(Date(e.at)), style = MaterialTheme.typography.bodySmall)
+            }
+            HorizontalDivider()
+        }
     }
 }

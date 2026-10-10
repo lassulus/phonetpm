@@ -7,6 +7,6 @@
     <string name="notif_starting">phonetpm starting…</string>
     <string name="notif_request_title">phonetpm request</string>
     <string name="notif_request_pair">Pairing request from %1$s</string>
-    <string name="notif_request_sign">SSH signature for %1$s</string>
-    <string name="notif_request_ecdh">age decrypt for %1$s</string>
+    <string name="notif_request_sign">SSH signature with %1$s for %2$s</string>
+    <string name="notif_request_ecdh">age decrypt with %1$s for %2$s</string>
 </resources>

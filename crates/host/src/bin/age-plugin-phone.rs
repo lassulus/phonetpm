@@ -13,6 +13,8 @@ use phonetpm::agekey::{Identity, ParsedStanza, Recipient, PLUGIN_NAME};
 use phonetpm::control;
 use phonetpm::proto::{Request, Response};
 
+const DESCRIPTION_ENV: &str = "PHONETPM_DESCRIPTION";
+
 #[derive(Parser)]
 #[command(version, about = "age plugin backed by phonetpm")]
 struct Opts {
@@ -123,6 +125,7 @@ impl IdentityPlugin {
         let req = Request::Ecdh {
             key_id: ident.key_id().to_owned(),
             peer_public_key: stanza.ephemeral_spki(),
+            description: description(),
         };
         let shared = match daemon.request(&req).map_err(|e| error(e.to_string()))? {
             Response::SharedSecret(x) => x,
@@ -138,6 +141,12 @@ impl IdentityPlugin {
         let file_key = ident.unwrap(stanza, &shared).map_err(|e| error(e.to_string()))?;
         Ok(FileKey::init_with_mut(|fk| fk.copy_from_slice(&file_key)))
     }
+}
+
+/// Why the file is being decrypted, shown on the phone; set by the caller of
+/// `age`, which passes its environment to the plugin.
+fn description() -> Option<String> {
+    std::env::var(DESCRIPTION_ENV).ok().filter(|d| !d.trim().is_empty())
 }
 
 impl identity::IdentityPluginV1 for IdentityPlugin {

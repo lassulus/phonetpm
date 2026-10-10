@@ -15,6 +15,8 @@ class App : Application() {
         private set
     lateinit var push: Push
         private set
+    lateinit var history: RequestHistory
+        private set
 
     override fun onCreate() {
         super.onCreate()
@@ -23,6 +25,7 @@ class App : Application() {
         hosts = PairedHosts(this)
         keys = KeyStoreRepo(this)
         push = Push(this)
+        history = RequestHistory(this)
         createChannels()
         push.refresh()
     }

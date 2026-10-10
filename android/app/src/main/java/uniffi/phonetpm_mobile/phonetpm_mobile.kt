@@ -1622,7 +1622,8 @@ sealed class Request {
     
     data class Ecdh(
         val `keyId`: kotlin.String, 
-        val `peerPublicKey`: kotlin.ByteArray) : Request()
+        val `peerPublicKey`: kotlin.ByteArray, 
+        val `description`: kotlin.String?) : Request()
         
     {
         
@@ -1631,8 +1632,8 @@ sealed class Request {
     }
     
     object PushEndpoint : Request()
-
-
+    
+    
 
     
 
@@ -1660,6 +1661,7 @@ public object FfiConverterTypeRequest : FfiConverterRustBuffer<Request>{
             4 -> Request.Ecdh(
                 FfiConverterString.read(buf),
                 FfiConverterByteArray.read(buf),
+                FfiConverterOptionalString.read(buf),
                 )
             5 -> Request.PushEndpoint
             else -> throw RuntimeException("invalid enum value, something is very wrong!!")
@@ -1694,6 +1696,7 @@ public object FfiConverterTypeRequest : FfiConverterRustBuffer<Request>{
                 4UL
                 + FfiConverterString.allocationSize(value.`keyId`)
                 + FfiConverterByteArray.allocationSize(value.`peerPublicKey`)
+                + FfiConverterOptionalString.allocationSize(value.`description`)
             )
         }
         is Request.PushEndpoint -> {
@@ -1725,6 +1728,7 @@ public object FfiConverterTypeRequest : FfiConverterRustBuffer<Request>{
                 buf.putInt(4)
                 FfiConverterString.write(value.`keyId`, buf)
                 FfiConverterByteArray.write(value.`peerPublicKey`, buf)
+                FfiConverterOptionalString.write(value.`description`, buf)
                 Unit
             }
             is Request.PushEndpoint -> {
@@ -1743,9 +1747,9 @@ sealed class Response {
     
     data class Paired(
         val `pushEndpoint`: kotlin.String?) : Response()
-
+        
     {
-
+        
 
         companion object
     }
@@ -1803,13 +1807,13 @@ sealed class Response {
      */
     data class PushEndpoint(
         val `endpoint`: kotlin.String?) : Response()
-
+        
     {
-
+        
 
         companion object
     }
-
+    
 
     
 

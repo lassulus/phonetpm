@@ -64,6 +64,18 @@ age -d -i phone.txt secret.age               # fingerprint on the phone
 `age-plugin-phone` must be on `PATH`; it talks to the daemon via
 `$XDG_RUNTIME_DIR/phonetpm/control.sock` (override with `PHONETPM_SOCK`).
 
+The phone shows which key is asked for. To also say why, set
+`PHONETPM_DESCRIPTION` for `age`; it is shown in the unlock prompt and kept in
+the app's History tab, along with the host, key and outcome of every signing
+and decryption request:
+
+```sh
+PHONETPM_DESCRIPTION="deploy secrets for coaxmetal" age -d -i phone.txt secret.age
+```
+
+The description field changed the wire format (`Ecdh` carries it), so the
+host and the app need to be updated together.
+
 ### Let the phone sleep (UnifiedPush)
 
 Without extra setup the app keeps a foreground service running so hosts can

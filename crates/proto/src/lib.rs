@@ -46,8 +46,9 @@ pub enum Request {
     /// Sign `data` with the P-256 key `key_id` (SHA256withECDSA).
     Sign { key_id: String, data: Vec<u8> },
     /// ECDH between key `key_id` and `peer_public_key` (SPKI DER). Returns the
-    /// raw 32-byte x-coordinate of the shared point.
-    Ecdh { key_id: String, peer_public_key: Vec<u8> },
+    /// raw 32-byte x-coordinate of the shared point. `description` is free text
+    /// from the requester, shown on the phone next to the key.
+    Ecdh { key_id: String, peer_public_key: Vec<u8>, description: Option<String> },
     /// Asks for the phone's current UnifiedPush endpoint. Hosts send it on
     /// every new connection, as the distributor may change the endpoint.
     PushEndpoint,
