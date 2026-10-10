@@ -29,8 +29,15 @@ age ──age-plugin-phone─┘   (control.sock)                 BiometricPromp
 
 ## Build
 
-Everything runs inside `nix develop` (Rust with Android targets, cargo-ndk,
-JDK 17, Gradle, Android SDK/NDK).
+The host binaries are a flake package for x86_64/aarch64 Linux and Darwin:
+
+```sh
+nix build github:lassulus/phonetpm         # result/bin/{phonetpm,age-plugin-phone}
+nix run github:lassulus/phonetpm -- pair <endpoint id>
+```
+
+Development, including the Android app, runs inside `nix develop` on
+x86_64-linux (Rust with Android targets, cargo-ndk, JDK 17, Gradle, Android SDK/NDK).
 
 ```sh
 nix develop

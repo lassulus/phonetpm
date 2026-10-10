@@ -35,8 +35,31 @@
         extensions = [ "rust-src" "rust-analyzer" ];
         targets = [ "aarch64-linux-android" "x86_64-linux-android" ];
       };
+      hostSystems = [ "x86_64-linux" "aarch64-linux" "aarch64-darwin" "x86_64-darwin" ];
+      # Host binaries (`phonetpm`, `age-plugin-phone`); the Android app is built in the devShell.
+      phonetpm = pkgs: pkgs.rustPlatform.buildRustPackage {
+        pname = "phonetpm";
+        version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).workspace.package.version;
+        src = pkgs.lib.fileset.toSource {
+          root = ./.;
+          fileset = pkgs.lib.fileset.unions [ ./Cargo.toml ./Cargo.lock ./crates ];
+        };
+        cargoLock.lockFile = ./Cargo.lock;
+        cargoBuildFlags = [ "-p" "phonetpm" ];
+        cargoTestFlags = [ "-p" "phonetpm" ];
+        meta = {
+          description = "phone as a biometric ssh-agent / age backend (host side)";
+          license = pkgs.lib.licenses.mit;
+          mainProgram = "phonetpm";
+          platforms = hostSystems;
+        };
+      };
     in
     {
+      packages = nixpkgs.lib.genAttrs hostSystems (s: {
+        default = phonetpm nixpkgs.legacyPackages.${s};
+      });
+
       devShells.${system}.default = pkgs.mkShell {
         packages = [
           rust
