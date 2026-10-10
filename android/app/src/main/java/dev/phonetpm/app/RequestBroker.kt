@@ -5,6 +5,11 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.media.AudioAttributes
+import android.os.Build
+import android.os.VibrationAttributes
+import android.os.VibrationEffect
+import android.os.VibratorManager
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
@@ -34,6 +39,8 @@ class PendingRequest(
 object RequestBroker {
     private const val TIMEOUT_SECONDS = 60L
     const val NOTIFICATION_ID = 2
+    /** Repeats from index 0 until the request is resolved. */
+    private val VIBRATION_PATTERN = longArrayOf(0, 500, 250, 500, 1200)
 
     private val seq = AtomicLong()
     private val _queue = MutableStateFlow<List<PendingRequest>>(emptyList())
@@ -57,7 +64,7 @@ object RequestBroker {
         } finally {
             pending.future.complete(Response.Denied) // no-op if already decided
             _queue.update { it - pending }
-            if (_queue.value.isEmpty()) dismissNotification(ctx)
+            if (_queue.value.isEmpty()) clearAlert(ctx)
         }
     }
 
@@ -65,8 +72,26 @@ object RequestBroker {
         pending.future.complete(response)
     }
 
-    private fun dismissNotification(ctx: Context) {
+    private fun clearAlert(ctx: Context) {
         ctx.getSystemService(NotificationManager::class.java).cancel(NOTIFICATION_ID)
+        ctx.getSystemService(VibratorManager::class.java).defaultVibrator.cancel()
+    }
+
+    /**
+     * Notification alerting alone proved unreliable (the screen turns on, but
+     * nothing buzzes), so vibrate explicitly, call-style, until [clearAlert].
+     * Alarm usage: the user started the operation, so it must reach them in a
+     * pocket even with the ringer on silent.
+     */
+    private fun vibrate(ctx: Context) {
+        val vibrator = ctx.getSystemService(VibratorManager::class.java).defaultVibrator
+        val effect = VibrationEffect.createWaveform(VIBRATION_PATTERN, 0)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            vibrator.vibrate(effect, VibrationAttributes.createForUsage(VibrationAttributes.USAGE_ALARM))
+        } else {
+            @Suppress("DEPRECATION")
+            vibrator.vibrate(effect, AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_ALARM).build())
+        }
     }
 
     private fun present(ctx: Context, pending: PendingRequest) {
@@ -95,6 +120,7 @@ object RequestBroker {
             .setTimeoutAfter(TIMEOUT_SECONDS * 1000)
             .build()
         ctx.getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, notification)
+        vibrate(ctx)
         try {
             ctx.startActivity(intent)
         } catch (_: Exception) {
