@@ -35,3 +35,6 @@ dirs = "5"
 libc = "0.2"
 age-plugin = "0.7"
 age-core = "0.12"
+# Both already in the tree via iroh-relay; ring is the provider iroh uses.
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring"] }

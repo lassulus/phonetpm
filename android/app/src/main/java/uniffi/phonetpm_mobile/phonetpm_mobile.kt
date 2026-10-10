@@ -1630,6 +1630,9 @@ sealed class Request {
         companion object
     }
     
+    object PushEndpoint : Request()
+
+
 
     
 
@@ -1658,6 +1661,7 @@ public object FfiConverterTypeRequest : FfiConverterRustBuffer<Request>{
                 FfiConverterString.read(buf),
                 FfiConverterByteArray.read(buf),
                 )
+            5 -> Request.PushEndpoint
             else -> throw RuntimeException("invalid enum value, something is very wrong!!")
         }
     }
@@ -1692,6 +1696,12 @@ public object FfiConverterTypeRequest : FfiConverterRustBuffer<Request>{
                 + FfiConverterByteArray.allocationSize(value.`peerPublicKey`)
             )
         }
+        is Request.PushEndpoint -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+            )
+        }
     }
 
     override fun write(value: Request, buf: ByteBuffer) {
@@ -1717,6 +1727,10 @@ public object FfiConverterTypeRequest : FfiConverterRustBuffer<Request>{
                 FfiConverterByteArray.write(value.`peerPublicKey`, buf)
                 Unit
             }
+            is Request.PushEndpoint -> {
+                buf.putInt(5)
+                Unit
+            }
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
     }
 }
@@ -1727,8 +1741,14 @@ public object FfiConverterTypeRequest : FfiConverterRustBuffer<Request>{
 
 sealed class Response {
     
-    object Paired : Response()
-    
+    data class Paired(
+        val `pushEndpoint`: kotlin.String?) : Response()
+
+    {
+
+
+        companion object
+    }
     
     data class Keys(
         val `keys`: List<uniffi.phonetpm_mobile.KeyInfo>) : Response()
@@ -1778,6 +1798,18 @@ sealed class Response {
         companion object
     }
     
+    /**
+     * UnifiedPush endpoint URL, `None` without a push distributor.
+     */
+    data class PushEndpoint(
+        val `endpoint`: kotlin.String?) : Response()
+
+    {
+
+
+        companion object
+    }
+
 
     
 
@@ -1794,7 +1826,9 @@ sealed class Response {
 public object FfiConverterTypeResponse : FfiConverterRustBuffer<Response>{
     override fun read(buf: ByteBuffer): Response {
         return when(buf.getInt()) {
-            1 -> Response.Paired
+            1 -> Response.Paired(
+                FfiConverterOptionalString.read(buf),
+                )
             2 -> Response.Keys(
                 FfiConverterSequenceTypeKeyInfo.read(buf),
                 )
@@ -1809,6 +1843,9 @@ public object FfiConverterTypeResponse : FfiConverterRustBuffer<Response>{
             7 -> Response.Error(
                 FfiConverterString.read(buf),
                 )
+            8 -> Response.PushEndpoint(
+                FfiConverterOptionalString.read(buf),
+                )
             else -> throw RuntimeException("invalid enum value, something is very wrong!!")
         }
     }
@@ -1818,6 +1855,7 @@ public object FfiConverterTypeResponse : FfiConverterRustBuffer<Response>{
             // Add the size for the Int that specifies the variant plus the size needed for all fields
             (
                 4UL
+                + FfiConverterOptionalString.allocationSize(value.`pushEndpoint`)
             )
         }
         is Response.Keys -> {
@@ -1860,12 +1898,20 @@ public object FfiConverterTypeResponse : FfiConverterRustBuffer<Response>{
                 + FfiConverterString.allocationSize(value.`message`)
             )
         }
+        is Response.PushEndpoint -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterOptionalString.allocationSize(value.`endpoint`)
+            )
+        }
     }
 
     override fun write(value: Response, buf: ByteBuffer) {
         when(value) {
             is Response.Paired -> {
                 buf.putInt(1)
+                FfiConverterOptionalString.write(value.`pushEndpoint`, buf)
                 Unit
             }
             is Response.Keys -> {
@@ -1894,6 +1940,11 @@ public object FfiConverterTypeResponse : FfiConverterRustBuffer<Response>{
             is Response.Error -> {
                 buf.putInt(7)
                 FfiConverterString.write(value.`message`, buf)
+                Unit
+            }
+            is Response.PushEndpoint -> {
+                buf.putInt(8)
+                FfiConverterOptionalString.write(value.`endpoint`, buf)
                 Unit
             }
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
@@ -1967,6 +2018,38 @@ internal object uniffiCallbackInterfaceHandler {
  * @suppress
  */
 public object FfiConverterTypeHandler: FfiConverterCallbackInterface<Handler>()
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalString: FfiConverterRustBuffer<kotlin.String?> {
+    override fun read(buf: ByteBuffer): kotlin.String? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterString.read(buf)
+    }
+
+    override fun allocationSize(value: kotlin.String?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterString.allocationSize(value)
+        }
+    }
+
+    override fun write(value: kotlin.String?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterString.write(value, buf)
+        }
+    }
+}
 
 
 

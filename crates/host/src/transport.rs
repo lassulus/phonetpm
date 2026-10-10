@@ -1,6 +1,8 @@
 //! iroh transport to the phone: one bi-stream per request, lazily connected,
-//! connection reused and re-established once on failure.
+//! connection reused and re-established once on failure. A phone that sleeps
+//! between requests is woken via its UnifiedPush endpoint before connecting.
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
@@ -9,9 +11,14 @@ use iroh::{Endpoint, EndpointId, SecretKey};
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
+use crate::config;
 use crate::proto::{self, Request, Response};
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
+/// How long a phone woken by a push gets to come up.
+const WAKE_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+const WAKE_RETRY: Duration = Duration::from_secs(1);
+const PUSH_TIMEOUT: Duration = Duration::from_secs(10);
 /// Upper bound on one request round trip, including the user's fingerprint prompt.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(90);
 
@@ -28,6 +35,7 @@ pub struct Phone {
     id: EndpointId,
     conn: Mutex<Option<Connection>>,
     last_request: std::sync::Mutex<Instant>,
+    push: Option<Arc<Push>>,
 }
 
 impl Phone {
@@ -37,6 +45,7 @@ impl Phone {
             id,
             conn: Mutex::new(None),
             last_request: std::sync::Mutex::new(Instant::now()),
+            push: None,
         }
     }
 
@@ -53,12 +62,47 @@ impl Phone {
         *self.last_request.lock().expect("not poisoned") = Instant::now();
     }
 
-    async fn connect(&self) -> Result<Connection> {
-        info!(phone = %self.id.fmt_short(), "connecting to phone");
-        let conn = tokio::time::timeout(CONNECT_TIMEOUT, self.endpoint.connect(self.id, proto::ALPN))
+    /// Enables waking the phone via UnifiedPush and keeping its endpoint (and
+    /// the config file) up to date. Without this the phone must be listening.
+    pub fn with_push(mut self, endpoint: Option<String>) -> Result<Self> {
+        self.push = Some(Arc::new(Push::new(endpoint)?));
+        Ok(self)
+    }
+
+    async fn connect_once(&self, timeout: Duration) -> Result<Connection> {
+        tokio::time::timeout(timeout, self.endpoint.connect(self.id, proto::ALPN))
             .await
             .map_err(|_| anyhow!("timed out connecting to phone"))?
-            .context("connecting to phone")?;
+            .context("connecting to phone")
+    }
+
+    /// Connects, first waking the phone if it has a push endpoint. A woken
+    /// phone needs a few seconds to start its endpoint, so keep retrying.
+    async fn connect(&self) -> Result<Connection> {
+        info!(phone = %self.id.fmt_short(), "connecting to phone");
+        let Some(push) = &self.push else { return self.connect_once(CONNECT_TIMEOUT).await };
+        let conn = match push.endpoint() {
+            None => self.connect_once(CONNECT_TIMEOUT).await?,
+            Some(url) => {
+                if let Err(e) = push.wake(&url).await {
+                    warn!("wake push failed ({e:#}); trying to connect anyway");
+                }
+                let deadline = Instant::now() + WAKE_CONNECT_TIMEOUT;
+                loop {
+                    let left = deadline.saturating_duration_since(Instant::now());
+                    match self.connect_once(left).await {
+                        Ok(conn) => break conn,
+                        Err(e) if left > WAKE_RETRY => {
+                            debug!("phone not up yet: {e:#}");
+                            tokio::time::sleep(WAKE_RETRY).await;
+                        }
+                        Err(e) => return Err(e.context("phone did not come up after the wake push")),
+                    }
+                }
+            }
+        };
+        let (push, refresh) = (push.clone(), conn.clone());
+        tokio::spawn(async move { push.refresh(&refresh).await });
         Ok(conn)
     }
 
@@ -94,6 +138,75 @@ impl Phone {
                 *guard = Some(conn);
                 Ok(resp)
             }
+        }
+    }
+}
+
+/// The phone's UnifiedPush endpoint and the HTTP client to wake it.
+struct Push {
+    endpoint: std::sync::Mutex<Option<String>>,
+    http: reqwest::Client,
+}
+
+impl Push {
+    fn new(endpoint: Option<String>) -> Result<Self> {
+        // reqwest is built without a default provider; iroh already uses ring.
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let http = reqwest::Client::builder()
+            .timeout(PUSH_TIMEOUT)
+            .build()
+            .context("building HTTP client")?;
+        Ok(Self { endpoint: std::sync::Mutex::new(endpoint), http })
+    }
+
+    fn endpoint(&self) -> Option<String> {
+        self.endpoint.lock().expect("not poisoned").clone()
+    }
+
+    /// POSTs a wake message to the push endpoint. The body is a constant: the
+    /// phone only needs to know someone wants to connect. `TTL`/`Urgency` are
+    /// the Web Push headers UnifiedPush servers understand.
+    async fn wake(&self, url: &str) -> Result<()> {
+        info!("waking phone via push");
+        self.http
+            .post(url)
+            .header("TTL", "60")
+            .header("Urgency", "high")
+            .body("wake")
+            .send()
+            .await
+            .context("sending push")?
+            .error_for_status()
+            .context("push server")?;
+        Ok(())
+    }
+
+    /// Asks the phone for its current endpoint and persists a change. Phones
+    /// predating `PushEndpoint` fail the stream; that just keeps the old value.
+    async fn refresh(&self, conn: &Connection) {
+        let resp = match proto::encode(&Request::PushEndpoint) {
+            Ok(frame) => roundtrip(conn, &frame).await,
+            Err(e) => Err(e.into()),
+        };
+        let new = match resp {
+            Ok(Response::PushEndpoint(new)) => new,
+            Ok(other) => return debug!("unexpected response to PushEndpoint: {other:?}"),
+            Err(e) => return debug!("phone did not report a push endpoint: {e:#}"),
+        };
+        {
+            let mut cur = self.endpoint.lock().expect("not poisoned");
+            if *cur == new {
+                return;
+            }
+            cur.clone_from(&new);
+        }
+        info!(endpoint = ?new, "phone push endpoint changed");
+        let saved = config::load_config().and_then(|mut cfg| {
+            cfg.push_endpoint = new;
+            config::save_config(&cfg)
+        });
+        if let Err(e) = saved {
+            warn!("saving push endpoint: {e:#}");
         }
     }
 }

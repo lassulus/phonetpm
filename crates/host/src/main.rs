@@ -77,7 +77,8 @@ fn hostname() -> String {
 async fn pair(phone_id: EndpointId) -> Result<()> {
     let secret = config::load_or_create_secret()?;
     let host_name = hostname();
-    config::save_config(&Config { phone: phone_id.to_string(), host_name: host_name.clone() })?;
+    let mut cfg = Config { phone: phone_id.to_string(), host_name: host_name.clone(), push_endpoint: None };
+    config::save_config(&cfg)?;
     let endpoint = transport::bind(secret).await?;
     println!("this host: {}", endpoint.id());
     println!("connecting to phone {phone_id}; approve the pairing request on the phone...");
@@ -85,8 +86,13 @@ async fn pair(phone_id: EndpointId) -> Result<()> {
     let resp = phone.request(&Request::Pair { host_name }).await;
     phone.endpoint().close().await;
     match resp? {
-        Response::Paired => {
+        Response::Paired { push_endpoint } => {
             println!("paired.");
+            if push_endpoint.is_some() {
+                println!("the phone sleeps between requests and is woken via UnifiedPush.");
+                cfg.push_endpoint = push_endpoint;
+                config::save_config(&cfg)?;
+            }
             println!();
             println!("Next:");
             println!("  phonetpm daemon &");
@@ -198,7 +204,7 @@ async fn daemon(activated: Option<Activated>) -> Result<()> {
     let secret = config::load_secret()?;
     let endpoint = transport::bind(secret).await?;
     info!(host = %endpoint.id(), phone = %phone_id, "endpoint bound");
-    let phone = Arc::new(Phone::new(endpoint, phone_id));
+    let phone = Arc::new(Phone::new(endpoint, phone_id).with_push(cfg.push_endpoint)?);
 
     // Socket files we created ourselves and must remove on exit; systemd owns
     // the activated ones.

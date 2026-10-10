@@ -86,6 +86,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         requestNotificationPermission()
+        App.of(this).push.register(this)
         setContent {
             MaterialTheme(colorScheme = if (isSystemInDarkTheme()) darkColorScheme() else lightColorScheme()) {
                 MainScreen(App.of(this))
@@ -192,6 +193,7 @@ private fun HomeTab(app: App) {
                     when {
                         error != null -> "Error: $error"
                         running -> "Running"
+                        enabled && app.push.onDemand -> "Asleep, woken by hosts via UnifiedPush"
                         enabled -> "Starting…"
                         else -> "Stopped"
                     },

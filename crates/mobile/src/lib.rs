@@ -35,11 +35,12 @@ pub enum Request {
     ListKeys,
     Sign { key_id: String, data: Vec<u8> },
     Ecdh { key_id: String, peer_public_key: Vec<u8> },
+    PushEndpoint,
 }
 
 #[derive(Debug, Clone, uniffi::Enum)]
 pub enum Response {
-    Paired,
+    Paired { push_endpoint: Option<String> },
     Keys { keys: Vec<KeyInfo> },
     /// ASN.1 DER ECDSA signature.
     Signature { der: Vec<u8> },
@@ -48,6 +49,8 @@ pub enum Response {
     Denied,
     UnknownKey,
     Error { message: String },
+    /// UnifiedPush endpoint URL, `None` without a push distributor.
+    PushEndpoint { endpoint: Option<String> },
 }
 
 impl From<proto::Request> for Request {
@@ -59,6 +62,7 @@ impl From<proto::Request> for Request {
             proto::Request::Ecdh { key_id, peer_public_key } => {
                 Request::Ecdh { key_id, peer_public_key }
             }
+            proto::Request::PushEndpoint => Request::PushEndpoint,
         }
     }
 }
@@ -66,7 +70,7 @@ impl From<proto::Request> for Request {
 impl From<Response> for proto::Response {
     fn from(r: Response) -> Self {
         match r {
-            Response::Paired => proto::Response::Paired,
+            Response::Paired { push_endpoint } => proto::Response::Paired { push_endpoint },
             Response::Keys { keys } => proto::Response::Keys(
                 keys.into_iter()
                     .map(|k| proto::KeyInfo {
@@ -85,6 +89,7 @@ impl From<Response> for proto::Response {
             Response::Denied => proto::Response::Denied,
             Response::UnknownKey => proto::Response::UnknownKey,
             Response::Error { message } => proto::Response::Error(message),
+            Response::PushEndpoint { endpoint } => proto::Response::PushEndpoint(endpoint),
         }
     }
 }

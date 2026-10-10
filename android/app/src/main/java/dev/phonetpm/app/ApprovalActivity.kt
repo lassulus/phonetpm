@@ -106,7 +106,7 @@ class ApprovalActivity : FragmentActivity() {
     private fun approvePair(pending: PendingRequest) {
         val req = pending.request as? Request.Pair ?: return
         app.hosts.add(pending.peerId, req.hostName)
-        RequestBroker.complete(pending, Response.Paired)
+        RequestBroker.complete(pending, Response.Paired(app.push.endpoint))
     }
 
     private fun showBiometric(pending: PendingRequest) {
@@ -229,7 +229,7 @@ private fun ApprovalScreen(
                 Spacer(Modifier.height(24.dp))
                 OutlinedButton(onClick = { onDeny(pending) }, modifier = Modifier.fillMaxWidth()) { Text("Deny") }
             }
-            Request.ListKeys -> Unit
+            Request.ListKeys, Request.PushEndpoint -> Unit
         }
     }
 }

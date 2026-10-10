@@ -48,11 +48,15 @@ pub enum Request {
     /// ECDH between key `key_id` and `peer_public_key` (SPKI DER). Returns the
     /// raw 32-byte x-coordinate of the shared point.
     Ecdh { key_id: String, peer_public_key: Vec<u8> },
+    /// Asks for the phone's current UnifiedPush endpoint. Hosts send it on
+    /// every new connection, as the distributor may change the endpoint.
+    PushEndpoint,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Response {
-    Paired,
+    /// `push_endpoint`: see [`Response::PushEndpoint`].
+    Paired { push_endpoint: Option<String> },
     Keys(Vec<KeyInfo>),
     Signature(Vec<u8>),
     SharedSecret(Vec<u8>),
@@ -60,6 +64,9 @@ pub enum Response {
     Denied,
     UnknownKey,
     Error(String),
+    /// UnifiedPush endpoint URL that wakes the phone when the host POSTs to
+    /// it, or `None` if the phone listens permanently (no push distributor).
+    PushEndpoint(Option<String>),
 }
 
 #[derive(Debug)]
@@ -123,5 +130,16 @@ mod tests {
         assert_eq!(check_len(len).unwrap(), bytes.len() - 4);
         let back: Request = decode(&bytes[4..]).unwrap();
         assert_eq!(back, req);
+    }
+
+    #[test]
+    fn push_endpoint_roundtrip() {
+        for resp in [
+            Response::Paired { push_endpoint: Some("https://ntfy.sh/upAbc?up=1".into()) },
+            Response::PushEndpoint(None),
+        ] {
+            let bytes = encode(&resp).unwrap();
+            assert_eq!(decode::<Response>(&bytes[4..]).unwrap(), resp);
+        }
     }
 }

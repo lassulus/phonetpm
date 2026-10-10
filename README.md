@@ -24,7 +24,7 @@ age ──age-plugin-phone─┘   (control.sock)                 BiometricPromp
 | `crates/proto` | wire protocol (postcard frames over one QUIC bi-stream per request) |
 | `crates/host` | `phonetpm` (daemon, pair, keys, identity) and `age-plugin-phone` |
 | `crates/mobile` | Rust core of the app: iroh endpoint + UniFFI surface (`libphonetpm_mobile.so`) |
-| `android/` | Kotlin/Compose app: Keystore, BiometricPrompt, foreground service, pairing UI |
+| `android/` | Kotlin/Compose app: Keystore, BiometricPrompt, foreground service, UnifiedPush wake-up, pairing UI |
 | `scripts/build-android-lib.sh` | cargo-ndk build + Kotlin binding generation |
 
 ## Build
@@ -56,6 +56,32 @@ age -d -i phone.txt secret.age               # fingerprint on the phone
 
 `age-plugin-phone` must be on `PATH`; it talks to the daemon via
 `$XDG_RUNTIME_DIR/phonetpm/control.sock` (override with `PHONETPM_SOCK`).
+
+### Let the phone sleep (UnifiedPush)
+
+Without extra setup the app keeps a foreground service running so hosts can
+connect at any time. With a [UnifiedPush](https://unifiedpush.org)
+distributor installed, the app only runs while hosts need it:
+
+1. Install [ntfy](https://f-droid.org/packages/io.heckel.ntfy/) from F-Droid
+   (any UnifiedPush distributor works; ntfy.sh or your own ntfy server).
+2. Open phonetpm; it registers with the distributor (pick ntfy if asked).
+   The Home tab then says "Asleep, woken by hosts via UnifiedPush".
+3. Pair (or, for an existing pairing, let the daemon connect once while the
+   app is open). The phone hands its push endpoint URL to the host, which
+   stores it as `push_endpoint` in `~/.config/phonetpm/config.toml` and
+   refreshes it on every connection.
+
+When a request comes in and there is no live connection, the daemon POSTs
+`wake` to that URL, the distributor wakes the app, and the app starts the
+iroh endpoint for the request and stops again after a minute without
+requests. The daemon keeps trying to connect for up to 30 s after the push.
+The push carries no data, and the push server only learns that this host
+wants to talk to the phone. If the distributor is uninstalled, the app falls
+back to listening permanently.
+
+Pairing changed the wire format (`Paired` now carries the push endpoint), so
+the host and the app need to be updated together.
 
 ### systemd socket activation
 

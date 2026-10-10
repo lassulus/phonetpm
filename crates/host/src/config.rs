@@ -22,6 +22,10 @@ pub struct Config {
     pub phone: String,
     /// Display name sent to the phone when pairing.
     pub host_name: String,
+    /// UnifiedPush endpoint reported by the phone; POSTed to wake it. Absent
+    /// while the phone listens permanently.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub push_endpoint: Option<String>,
 }
 
 impl Config {

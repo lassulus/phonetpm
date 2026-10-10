@@ -53,13 +53,14 @@ impl Handler for FakePhone {
         if let Request::Pair { host_name } = &request {
             eprintln!("[fake_phone] auto-approving pair from {host_name}");
             self.paired.lock().insert(peer_id);
-            return Response::Paired;
+            return Response::Paired { push_endpoint: push_endpoint() };
         }
         if !self.paired.lock().contains(&peer_id) {
             return Response::Denied;
         }
         match request {
             Request::Pair { .. } => unreachable!(),
+            Request::PushEndpoint => Response::PushEndpoint { endpoint: push_endpoint() },
             Request::ListKeys => {
                 Response::Keys { keys: self.keys.iter().map(|k| k.info.clone()).collect() }
             }
@@ -86,6 +87,11 @@ impl Handler for FakePhone {
             },
         }
     }
+}
+
+/// `FAKE_PHONE_PUSH_ENDPOINT` is reported as the UnifiedPush endpoint.
+fn push_endpoint() -> Option<String> {
+    std::env::var("FAKE_PHONE_PUSH_ENDPOINT").ok().filter(|s| !s.is_empty())
 }
 
 fn main() {

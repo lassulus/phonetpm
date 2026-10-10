@@ -80,7 +80,7 @@ object RequestBroker {
             is Request.Pair -> ctx.getString(R.string.notif_request_pair, pending.hostName)
             is Request.Sign -> ctx.getString(R.string.notif_request_sign, pending.hostName)
             is Request.Ecdh -> ctx.getString(R.string.notif_request_ecdh, pending.hostName)
-            Request.ListKeys -> return
+            Request.ListKeys, Request.PushEndpoint -> return
         }
         // Background activity starts are blocked on modern Android; the
         // full-screen intent is what reliably brings the approval UI up.

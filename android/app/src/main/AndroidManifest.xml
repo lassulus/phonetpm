@@ -44,6 +44,15 @@
             android:exported="false"
             android:foregroundServiceType="connectedDevice" />
 
+        <!-- UnifiedPush events; bound by the connector library, not exported. -->
+        <service
+            android:name=".PushServiceImpl"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="org.unifiedpush.android.connector.PUSH_EVENT" />
+            </intent-filter>
+        </service>
+
         <receiver
             android:name=".BootReceiver"
             android:exported="true">
