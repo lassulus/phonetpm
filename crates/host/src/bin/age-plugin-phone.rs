@@ -11,7 +11,9 @@ use clap::Parser;
 
 use phonetpm::agekey::{Identity, ParsedStanza, Recipient, PLUGIN_NAME};
 use phonetpm::control;
-use phonetpm::proto::{Request, Response};
+use phonetpm::proto::{self, Request, Response};
+use phonetpm::transport::response_kind;
+use zeroize::Zeroizing;
 
 const DESCRIPTION_ENV: &str = "PHONETPM_DESCRIPTION";
 
@@ -110,11 +112,68 @@ struct IdentityPlugin {
     identities: Vec<Identity>,
 }
 
+/// Why the plugin stops asking the phone for the rest of this invocation:
+/// re-prompting for every file/stanza would wear the user down into approving.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Halt {
+    /// The phone refused a request.
+    Denied,
+    /// The user approved a request, but its stanza did not decrypt: the file
+    /// was crafted to collect approvals.
+    Malformed,
+}
+
+impl Halt {
+    fn not_attempted(self) -> &'static str {
+        match self {
+            Halt::Denied => "not attempted: the phone denied an earlier request",
+            Halt::Malformed => "not attempted: an earlier approved request did not decrypt (malformed file)",
+        }
+    }
+}
+
+/// Whether a stanza may cost a phone round trip.
+#[derive(Debug, PartialEq, Eq)]
+enum Attempt {
+    New,
+    /// This identity was already asked for the current file.
+    AskedInFile,
+    /// This identity was already asked about this ephemeral key.
+    DuplicateEpk,
+}
+
+/// Phone round trips in this invocation: at most one per identity per file,
+/// and never twice for the same identity and ephemeral key.
+#[derive(Default)]
+struct Attempts {
+    epks: HashSet<(usize, Vec<u8>)>,
+    file: HashSet<usize>,
+}
+
+impl Attempts {
+    fn next_file(&mut self) {
+        self.file.clear();
+    }
+
+    fn record(&mut self, ident_index: usize, epk: Vec<u8>) -> Attempt {
+        if self.file.contains(&ident_index) {
+            return Attempt::AskedInFile;
+        }
+        if !self.epks.insert((ident_index, epk)) {
+            return Attempt::DuplicateEpk;
+        }
+        self.file.insert(ident_index);
+        Attempt::New
+    }
+}
+
 impl IdentityPlugin {
-    /// Asks the phone for the ECDH result and unwraps the stanza.
+    /// Asks the phone for the ECDH result and unwraps the stanza. Sets `halt`
+    /// when the phone refused or an approved result did not decrypt.
     fn unwrap(
         &self,
         daemon: &mut control::Client,
+        halt: &mut Option<Halt>,
         callbacks: &mut impl Callbacks<identity::Error>,
         ident_index: usize,
         stanza: &ParsedStanza,
@@ -128,25 +187,30 @@ impl IdentityPlugin {
             description: description(),
         };
         let shared = match daemon.request(&req).map_err(|e| error(e.to_string()))? {
-            Response::SharedSecret(x) => x,
+            Response::SharedSecret(x) => Zeroizing::new(x),
             Response::Denied => {
-                return Err(error("the phone denied the request (declined, or host not paired)".into()))
+                *halt = Some(Halt::Denied);
+                return Err(error("the phone denied the request (declined, or host not paired)".into()));
             }
             Response::UnknownKey => {
                 return Err(error(format!("the phone has no key {:?}", ident.key_id())))
             }
             Response::Error(e) => return Err(error(format!("phonetpm daemon: {e}"))),
-            other => return Err(error(format!("unexpected response {other:?}"))),
+            other => return Err(error(format!("unexpected response {}", response_kind(&other)))),
         };
-        let file_key = ident.unwrap(stanza, &shared).map_err(|e| error(e.to_string()))?;
-        Ok(FileKey::init_with_mut(|fk| fk.copy_from_slice(&file_key)))
+        ident.unwrap(stanza, &shared).map_err(|e| {
+            *halt = Some(Halt::Malformed);
+            error(format!("malformed file: approved request did not decrypt the stanza ({e}); no further requests will be sent"))
+        })
     }
 }
 
 /// Why the file is being decrypted, shown on the phone; set by the caller of
-/// `age`, which passes its environment to the plugin.
+/// `age`, which passes its environment to the plugin. Sanitized here too; the
+/// phone does not trust it either.
 fn description() -> Option<String> {
-    std::env::var(DESCRIPTION_ENV).ok().filter(|d| !d.trim().is_empty())
+    let d = std::env::var(DESCRIPTION_ENV).ok()?;
+    Some(proto::sanitize_text(&d, proto::MAX_DESCRIPTION_CHARS)).filter(|d| !d.is_empty())
 }
 
 impl identity::IdentityPluginV1 for IdentityPlugin {
@@ -169,8 +233,11 @@ impl identity::IdentityPluginV1 for IdentityPlugin {
         mut callbacks: impl Callbacks<identity::Error>,
     ) -> io::Result<HashMap<usize, Result<FileKey, Vec<identity::Error>>>> {
         let mut daemon: Option<control::Client> = None;
+        let mut halt: Option<Halt> = None;
+        let mut attempts = Attempts::default();
         let mut out = HashMap::new();
         for (file_index, stanzas) in files.into_iter().enumerate() {
+            attempts.next_file();
             let mut errors = Vec::new();
             let mut file_key = None;
             for (stanza_index, stanza) in stanzas.iter().enumerate() {
@@ -189,6 +256,26 @@ impl identity::IdentityPluginV1 for IdentityPlugin {
                 let Some(ident_index) = self.identities.iter().position(|i| i.matches(&parsed)) else {
                     continue;
                 };
+                if let Some(h) = halt {
+                    errors.push(identity::Error::Identity {
+                        index: ident_index,
+                        message: h.not_attempted().into(),
+                    });
+                    break;
+                }
+                match attempts.record(ident_index, parsed.ephemeral_spki()) {
+                    Attempt::New => {}
+                    // The earlier attempt's error is already recorded.
+                    Attempt::AskedInFile => continue,
+                    Attempt::DuplicateEpk => {
+                        errors.push(identity::Error::Stanza {
+                            file_index,
+                            stanza_index,
+                            message: "not attempted: ephemeral key already used".into(),
+                        });
+                        continue;
+                    }
+                }
                 let client = match &mut daemon {
                     Some(c) => c,
                     None => match control::Client::connect() {
@@ -199,7 +286,7 @@ impl identity::IdentityPluginV1 for IdentityPlugin {
                         }
                     },
                 };
-                match self.unwrap(client, &mut callbacks, ident_index, &parsed) {
+                match self.unwrap(client, &mut halt, &mut callbacks, ident_index, &parsed) {
                     Ok(fk) => {
                         file_key = Some(fk);
                         break;
@@ -218,5 +305,21 @@ impl identity::IdentityPluginV1 for IdentityPlugin {
             }
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn attempts_one_per_identity_per_file_and_unique_epks() {
+        let mut a = Attempts::default();
+        assert_eq!(a.record(0, vec![1]), Attempt::New);
+        assert_eq!(a.record(0, vec![2]), Attempt::AskedInFile);
+        assert_eq!(a.record(1, vec![1]), Attempt::New, "other identity");
+        a.next_file();
+        assert_eq!(a.record(0, vec![1]), Attempt::DuplicateEpk);
+        assert_eq!(a.record(0, vec![3]), Attempt::New);
     }
 }

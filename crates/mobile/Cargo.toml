@@ -16,6 +16,7 @@ path = "uniffi-bindgen.rs"
 phonetpm-proto.workspace = true
 iroh.workspace = true
 tokio.workspace = true
+parking_lot = "0.12"
 tracing = { version = "0.1", features = ["log"] }
 uniffi = { version = "0.32", features = ["cli"] }
 
@@ -27,4 +28,3 @@ log = "0.4"
 [dev-dependencies]
 p256.workspace = true
 rand.workspace = true
-parking_lot = "0.12"

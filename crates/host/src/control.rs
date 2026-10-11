@@ -1,6 +1,8 @@
 //! Local control socket: wire-protocol frames over a unix socket. Clients may
 //! send several requests sequentially on one connection; the daemon forwards
-//! each to the phone and answers with one response frame.
+//! each to the phone and answers with one response frame. Only `ListKeys` and
+//! `Ecdh` (the age plugin's needs) are forwarded; anything else could be used
+//! by local processes to get uninformed approvals (signatures, pairing).
 
 use std::io::{self, Read, Write};
 use std::os::unix::net::UnixStream;
@@ -55,12 +57,15 @@ pub async fn serve(listener: UnixListener, phone: Arc<Phone>) {
 async fn handle(mut stream: tokio::net::UnixStream, phone: Arc<Phone>) -> Result<()> {
     while let Some(body) = read_frame(&mut stream).await? {
         let req: Request = proto::decode(&body)?;
-        let resp = match phone.request(&req).await {
-            Ok(resp) => resp,
-            Err(e) => {
-                warn!("forwarding control request failed: {e:#}");
-                Response::Error(format!("{e:#}"))
-            }
+        let resp = match req {
+            Request::ListKeys | Request::Ecdh { .. } => match phone.request(&req).await {
+                Ok(resp) => resp,
+                Err(e) => {
+                    warn!("forwarding control request failed: {e:#}");
+                    Response::Error(format!("{e:#}"))
+                }
+            },
+            _ => Response::Error("not allowed over the control socket".into()),
         };
         write_frame(&mut stream, &resp).await?;
     }
@@ -74,7 +79,7 @@ pub struct Client {
 
 impl Client {
     pub fn connect() -> Result<Self> {
-        let path = config::control_sock_path();
+        let path = config::control_sock_path()?;
         let stream = UnixStream::connect(&path).map_err(|e| match e.kind() {
             io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused => {
                 anyhow!("phonetpm daemon not running (no socket at {})", path.display())

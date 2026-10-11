@@ -3,19 +3,26 @@ name: release
 on:
   push:
     tags: ["v*"]
+  # Builds only: signing and publishing are restricted to tag refs below.
   workflow_dispatch:
 
-permissions:
-  contents: write
+permissions: {}
 
 jobs:
+  # Runs all third-party code (cargo crates, Nix, Gradle) and therefore gets no
+  # secrets and a read-only token. The release APK is built unsigned.
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     env:
-      PHONETPM_VERSION: ${{ github.ref_name }}
-      ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+      # Only release tags set the app version; Gradle rejects malformed ones.
+      PHONETPM_VERSION: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
+      DIST_VERSION: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || github.sha }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       # The nix-provided Android SDK/NDK + Rust toolchain do not fit next to the
       # preinstalled toolchains on the hosted image.
@@ -28,28 +35,7 @@ jobs:
           sudo apt-get clean
           df -h /
 
-      - uses: cachix/install-nix-action@v31
-        with:
-          nix_path: nixpkgs=channel:nixos-unstable
-          extra_nix_config: |
-            accept-flake-config = true
-
-      - uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'flake.lock') }}
-          restore-keys: cargo-${{ runner.os }}-
-
-      - uses: actions/cache@v4
-        with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: gradle-${{ runner.os }}-${{ hashFiles('android/gradle/libs.versions.toml', 'android/**/*.kts') }}
-          restore-keys: gradle-${{ runner.os }}-
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
 
       - name: Build host binaries
         run: nix develop -c cargo build -p phonetpm --release
@@ -60,35 +46,106 @@ jobs:
       - name: Build Android native library + bindings
         run: nix develop -c scripts/build-android-lib.sh
 
-      - name: Import release keystore
-        if: ${{ env.ANDROID_KEYSTORE_BASE64 != '' }}
-        run: |
-          echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.keystore"
-          echo "ANDROID_KEYSTORE_PATH=$RUNNER_TEMP/release.keystore" >> "$GITHUB_ENV"
-
-      - name: Build APK
-        env:
-          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
-          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+      - name: Build unsigned APK
         run: nix develop -c gradle -p android --no-daemon assembleRelease
 
       - name: Package artifacts
         run: |
           mkdir -p dist
-          tar -C target/release -czf "dist/phonetpm-${PHONETPM_VERSION}-x86_64-linux.tar.gz" phonetpm age-plugin-phone
-          cp android/app/build/outputs/apk/release/app-release.apk "dist/phonetpm-${PHONETPM_VERSION}.apk"
+          tar -C target/release -czf "dist/phonetpm-${DIST_VERSION}-x86_64-linux.tar.gz" phonetpm age-plugin-phone
+          cp android/app/build/outputs/apk/release/app-release-unsigned.apk "dist/phonetpm-${DIST_VERSION}-unsigned.apk"
+          ls -l dist
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: host-tarball
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: unsigned-apk
+          path: dist/*-unsigned.apk
+          if-no-files-found: error
+
+  # The only job that sees the signing key. It checks out and runs no repository
+  # code; it signs the build job's APK with the runner's preinstalled apksigner.
+  # The `release` environment only accepts v* tags (repository settings), and a
+  # tag ruleset restricts who can push them.
+  sign:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    environment: release
+    permissions: {}
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: unsigned-apk
+          path: unsigned
+
+      - name: Sign APK
+        env:
+          TAG: ${{ github.ref_name }}
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          : "${ANDROID_KEYSTORE_BASE64:?release keystore secret missing}"
+          build_tools=$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -n 1)
+          keystore="$RUNNER_TEMP/release.keystore"
+          trap 'rm -f "$keystore"' EXIT
+          (umask 077 && printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 -d > "$keystore")
+          unsigned="unsigned/phonetpm-${TAG}-unsigned.apk"
+          mkdir -p signed
+          signed="signed/phonetpm-${TAG}.apk"
+          # apksigner does not align; the uncompressed native libs must already
+          # be 16 KiB page-aligned by AGP.
+          "$build_tools/zipalign" -c -P 16 4 "$unsigned"
+          "$build_tools/apksigner" sign \
+            --ks "$keystore" --ks-pass env:ANDROID_KEYSTORE_PASSWORD \
+            --ks-key-alias "$ANDROID_KEY_ALIAS" --key-pass env:ANDROID_KEY_PASSWORD \
+            --out "$signed" "$unsigned"
+          "$build_tools/apksigner" verify --verbose --print-certs "$signed"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: signed-apk
+          path: signed/*.apk
+          if-no-files-found: error
+
+  release:
+    needs: [build, sign]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: host-tarball
+          path: dist
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: signed-apk
+          path: dist
+
+      - name: Checksums
+        run: |
           (cd dist && sha256sum -- * > SHA256SUMS)
           ls -l dist
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
-          name: phonetpm-${{ env.PHONETPM_VERSION }}
-          path: dist/*
+          subject-path: dist/*
 
       - name: Create release
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: dist/*
-          generate_release_notes: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: gh release create "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes

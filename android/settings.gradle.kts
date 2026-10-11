@@ -2,7 +2,14 @@ pluginManagement {
     repositories {
         google()
         mavenCentral()
-        gradlePluginPortal()
+        // Only plugin marker POMs may come from the portal (which proxies
+        // arbitrary repositories); implementation artifacts must resolve from
+        // google() or mavenCentral().
+        gradlePluginPortal {
+            content {
+                includeModuleByRegex(".*", ".*\\.gradle\\.plugin")
+            }
+        }
     }
 }
 

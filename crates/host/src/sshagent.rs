@@ -13,8 +13,8 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
-use crate::proto::{KeyInfo, KeyKind, Request, Response};
-use crate::transport::Phone;
+use crate::proto::{self, KeyInfo, KeyKind, Request, Response};
+use crate::transport::{response_kind, Phone};
 
 pub const KEY_TYPE: &str = "ecdsa-sha2-nistp256";
 const CURVE: &str = "nistp256";
@@ -91,6 +91,38 @@ fn parse_sign_request(mut payload: &[u8]) -> Option<(&[u8], &[u8])> {
     (payload.len() == 4).then_some((blob, data))
 }
 
+const SSH_MSG_USERAUTH_REQUEST: u8 = 50;
+
+/// What is being signed, for the phone's prompt: an `SSHSIG` blob from
+/// `ssh-keygen -Y sign` (git signing among others) or an SSH userauth request.
+/// `None` when the data is neither.
+fn describe(data: &[u8]) -> Option<String> {
+    let text = if let Some(mut rest) = data.strip_prefix(b"SSHSIG") {
+        // byte[6] "SSHSIG" || string namespace || string reserved || string hash_alg || string H(message)
+        let ns = String::from_utf8_lossy(get_string(&mut rest)?);
+        if ns == "git" {
+            "git commit/tag signing (ssh-keygen signature, namespace git)".to_owned()
+        } else {
+            format!("ssh-keygen signature, namespace {ns}")
+        }
+    } else {
+        // string session_id || byte 50 || string user || string service || string "publickey" || ...
+        let mut rest = data;
+        get_string(&mut rest)?;
+        let (&msg, mut rest) = rest.split_first()?;
+        if msg != SSH_MSG_USERAUTH_REQUEST {
+            return None;
+        }
+        let user = get_string(&mut rest)?;
+        get_string(&mut rest)?;
+        if get_string(&mut rest)? != b"publickey" {
+            return None;
+        }
+        format!("SSH login as {}", String::from_utf8_lossy(user))
+    };
+    Some(proto::sanitize_text(&text, proto::MAX_DESCRIPTION_CHARS))
+}
+
 fn identities_answer(keys: &[(Vec<u8>, String)]) -> Vec<u8> {
     let mut out = vec![SSH_AGENT_IDENTITIES_ANSWER];
     out.extend_from_slice(&(keys.len() as u32).to_be_bytes());
@@ -144,7 +176,7 @@ impl Agent {
         let keys = match self.phone.request(&Request::ListKeys).await? {
             Response::Keys(keys) => Arc::new(cache_entries(keys)),
             Response::Denied => bail!("phone denied key listing (host not paired?)"),
-            other => bail!("unexpected response to ListKeys: {other:?}"),
+            other => bail!("unexpected response to ListKeys: {}", response_kind(&other)),
         };
         *cache = Some((Instant::now(), keys.clone()));
         Ok(keys)
@@ -181,12 +213,12 @@ impl Agent {
                 let (key_id, label) =
                     self.find_key(blob).await?.ok_or_else(|| anyhow!("unknown key in sign request"))?;
                 info!(key = %label, "requesting signature from phone");
-                let req = Request::Sign { key_id, data: data.to_vec() };
+                let req = Request::Sign { key_id, data: data.to_vec(), description: describe(data) };
                 let der = match self.phone.request(&req).await? {
                     Response::Signature(der) => der,
                     Response::Denied => bail!("phone denied the signature"),
                     Response::UnknownKey => bail!("phone no longer has key {label}"),
-                    other => bail!("unexpected response to Sign: {other:?}"),
+                    other => bail!("unexpected response to Sign: {}", response_kind(&other)),
                 };
                 let mut out = vec![SSH_AGENT_SIGN_RESPONSE];
                 put_string(&mut out, &der_to_ssh_signature(&der)?);
@@ -312,6 +344,55 @@ mod tests {
         assert_eq!(get_string(&mut buf).unwrap(), b"nistp256");
         assert_eq!(get_string(&mut buf).unwrap(), &point[..]);
         assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn describes_sshsig_blobs() {
+        // As built by ssh-keygen -Y sign (sshsig.c, PROTOCOL.sshsig).
+        let blob = |ns: &[u8]| {
+            let mut b = b"SSHSIG".to_vec();
+            put_string(&mut b, ns);
+            put_string(&mut b, b"");
+            put_string(&mut b, b"sha512");
+            put_string(&mut b, &[0xab; 64]);
+            b
+        };
+        assert_eq!(
+            describe(&blob(b"git")).unwrap(),
+            "git commit/tag signing (ssh-keygen signature, namespace git)"
+        );
+        assert_eq!(describe(&blob(b"file")).unwrap(), "ssh-keygen signature, namespace file");
+        // Control and bidi characters in the namespace do not reach the phone.
+        assert_eq!(
+            describe(&blob("fi\u{202e}le\nx".as_bytes())).unwrap(),
+            "ssh-keygen signature, namespace file x"
+        );
+        assert_eq!(describe(b"SSHSIG\0\0"), None);
+    }
+
+    #[test]
+    fn describes_userauth_requests() {
+        // RFC 4252 section 7 signed data for publickey authentication.
+        let mut data = Vec::new();
+        put_string(&mut data, &[0x11; 32]);
+        data.push(SSH_MSG_USERAUTH_REQUEST);
+        put_string(&mut data, b"alice");
+        put_string(&mut data, b"ssh-connection");
+        put_string(&mut data, b"publickey");
+        data.push(1);
+        put_string(&mut data, KEY_TYPE.as_bytes());
+        put_string(&mut data, b"keyblob");
+        assert_eq!(describe(&data).unwrap(), "SSH login as alice");
+
+        let mut other = Vec::new();
+        put_string(&mut other, &[0x11; 32]);
+        other.push(SSH_MSG_USERAUTH_REQUEST);
+        put_string(&mut other, b"alice");
+        put_string(&mut other, b"ssh-connection");
+        put_string(&mut other, b"hostbased");
+        assert_eq!(describe(&other), None);
+        assert_eq!(describe(b"arbitrary data"), None);
+        assert_eq!(describe(b""), None);
     }
 
     #[test]

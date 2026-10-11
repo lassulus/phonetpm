@@ -16,14 +16,17 @@ enum class Outcome(val label: String) {
 data class HistoryEntry(
     val at: Long,
     val hostName: String,
-    /** "SSH signature" or "age decrypt". */
+    /** Empty for entries recorded before the peer id was kept. */
+    val peerId: String,
+    /** "Pairing", "SSH signature" or "age decrypt". */
     val action: String,
+    /** Empty for pairing. */
     val keyLabel: String,
     val description: String?,
     val outcome: Outcome,
 )
 
-/** Decided signing/decryption requests, newest first, capped at [MAX]. */
+/** Decided pairing, signing and decryption requests, newest first, capped at [MAX]. */
 class RequestHistory(ctx: Context) {
     private val prefs = ctx.getSharedPreferences("history", Context.MODE_PRIVATE)
     private val state = MutableStateFlow(load())
@@ -46,6 +49,7 @@ class RequestHistory(ctx: Context) {
                 JSONObject()
                     .put("at", e.at)
                     .put("hostName", e.hostName)
+                    .put("peerId", e.peerId)
                     .put("action", e.action)
                     .put("keyLabel", e.keyLabel)
                     .put("description", e.description ?: JSONObject.NULL)
@@ -64,6 +68,7 @@ class RequestHistory(ctx: Context) {
             HistoryEntry(
                 at = o.getLong("at"),
                 hostName = o.getString("hostName"),
+                peerId = o.optString("peerId"),
                 action = o.getString("action"),
                 keyLabel = o.getString("keyLabel"),
                 description = if (o.isNull("description")) null else o.getString("description"),

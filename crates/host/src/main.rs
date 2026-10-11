@@ -80,17 +80,23 @@ async fn pair(phone_id: EndpointId) -> Result<()> {
     let mut cfg = Config { phone: phone_id.to_string(), host_name: host_name.clone(), push_endpoint: None };
     config::save_config(&cfg)?;
     let endpoint = transport::bind(secret).await?;
-    println!("this host: {}", endpoint.id());
-    println!("connecting to phone {phone_id}; approve the pairing request on the phone...");
+    let host_id = endpoint.id().to_string();
+    println!("this host: {host_id}");
+    println!();
+    println!("    host id starts with: {}", &host_id[..8]);
+    println!();
+    println!("connecting to phone {phone_id}.");
+    println!("Approve the pairing request on the phone ONLY if it shows a host id");
+    println!("starting with {}; otherwise deny it.", &host_id[..8]);
     let phone = Phone::new(endpoint, phone_id);
     let resp = phone.request(&Request::Pair { host_name }).await;
     phone.endpoint().close().await;
     match resp? {
         Response::Paired { push_endpoint } => {
             println!("paired.");
-            if push_endpoint.is_some() {
+            if let Some(url) = push_endpoint.and_then(transport::checked_push_url) {
                 println!("the phone sleeps between requests and is woken via UnifiedPush.");
-                cfg.push_endpoint = push_endpoint;
+                cfg.push_endpoint = Some(url);
                 config::save_config(&cfg)?;
             }
             println!();
@@ -100,7 +106,7 @@ async fn pair(phone_id: EndpointId) -> Result<()> {
             Ok(())
         }
         Response::Denied => bail!("pairing denied on the phone"),
-        other => bail!("unexpected response to Pair: {other:?}"),
+        other => bail!("unexpected response to Pair: {}", transport::response_kind(&other)),
     }
 }
 
@@ -174,6 +180,17 @@ fn activated_sockets() -> Result<Option<Activated>> {
                 config::CONTROL_SOCK
             ),
         };
+        // Clients refuse a socket directory that is not 0700, and systemd
+        // creates it 0755 unless told otherwise; say so here, not in every client.
+        let Some(sock) = path.as_deref() else {
+            bail!("socket-activated fd {fd} is not bound to a filesystem path");
+        };
+        config::verify_socket_parent(sock).with_context(|| {
+            format!(
+                "socket-activated {}: set DirectoryMode=0700 in the socket unit",
+                sock.display()
+            )
+        })?;
         listener.set_nonblocking(true)?;
         *slot = Some(listener);
     }
@@ -250,7 +267,7 @@ fn list_keys() -> Result<Vec<KeyInfo>> {
         Response::Keys(keys) => Ok(keys),
         Response::Denied => bail!("phone denied the request; is this host paired?"),
         Response::Error(e) => bail!("daemon: {e}"),
-        other => bail!("unexpected response to ListKeys: {other:?}"),
+        other => bail!("unexpected response to ListKeys: {}", transport::response_kind(&other)),
     }
 }
 

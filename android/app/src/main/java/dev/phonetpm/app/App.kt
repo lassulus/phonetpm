@@ -1,7 +1,6 @@
 package dev.phonetpm.app
 
 import android.app.Application
-import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.content.Context
@@ -35,22 +34,30 @@ class App : Application() {
         nm.createNotificationChannel(
             NotificationChannel(CHANNEL_SERVICE, getString(R.string.channel_service), NotificationManager.IMPORTANCE_LOW)
         )
-        // Channel settings are frozen once created, so vibration needed a new id.
-        nm.deleteNotificationChannel(LEGACY_CHANNEL_REQUESTS)
+        // Channel settings are frozen once created, so vibration and then the
+        // removal of public lock-screen visibility each needed a new id.
+        LEGACY_CHANNELS_REQUESTS.forEach(nm::deleteNotificationChannel)
         nm.createNotificationChannel(
             NotificationChannel(CHANNEL_REQUESTS, getString(R.string.channel_requests), NotificationManager.IMPORTANCE_HIGH)
                 .apply {
                     enableVibration(true)
                     vibrationPattern = longArrayOf(0, 400, 200, 400)
-                    lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+                }
+        )
+        nm.createNotificationChannel(
+            NotificationChannel(CHANNEL_PAIRING, getString(R.string.channel_pairing), NotificationManager.IMPORTANCE_HIGH)
+                .apply {
+                    enableVibration(false)
+                    setSound(null, null)
                 }
         )
     }
 
     companion object {
         const val CHANNEL_SERVICE = "service"
-        const val CHANNEL_REQUESTS = "requests_alert"
-        private const val LEGACY_CHANNEL_REQUESTS = "requests"
+        const val CHANNEL_REQUESTS = "requests_private"
+        const val CHANNEL_PAIRING = "pairing"
+        private val LEGACY_CHANNELS_REQUESTS = listOf("requests", "requests_alert")
 
         fun of(ctx: Context): App = ctx.applicationContext as App
     }

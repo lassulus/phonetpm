@@ -8,12 +8,19 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import org.json.JSONArray
 import org.json.JSONObject
+import java.math.BigInteger
+import java.security.KeyFactory
 import java.security.KeyPairGenerator
 import java.security.KeyStore
 import java.security.MessageDigest
 import java.security.PrivateKey
 import java.security.SecureRandom
+import java.security.interfaces.ECPublicKey
+import java.security.spec.ECFieldFp
 import java.security.spec.ECGenParameterSpec
+import java.security.spec.ECParameterSpec
+import java.security.spec.ECPoint
+import java.security.spec.ECPublicKeySpec
 import uniffi.phonetpm_mobile.KeyInfo
 import uniffi.phonetpm_mobile.KeyKind
 
@@ -41,6 +48,15 @@ class KeyStoreRepo(ctx: Context) {
     fun publicKey(id: String): ByteArray? = keyStore.getCertificate(id)?.publicKey?.encoded
 
     fun privateKey(id: String): PrivateKey? = keyStore.getKey(id, null) as? PrivateKey
+
+    /**
+     * The ECDH peer key from [spki] if it is a P-256 SPKI with an uncompressed
+     * point on the curve of key [id]; else null (also if the key is gone).
+     */
+    fun ecdhPeerKey(id: String, spki: ByteArray): ECPublicKey? {
+        val params = (keyStore.getCertificate(id)?.publicKey as? ECPublicKey)?.params ?: return null
+        return p256PeerKey(spki, params)
+    }
 
     fun keyInfos(): List<KeyInfo> = state.value.mapNotNull { m ->
         publicKey(m.id)?.let { KeyInfo(m.id, m.label, m.kind, it) }
@@ -90,8 +106,10 @@ class KeyStoreRepo(ctx: Context) {
                         setUserAuthenticationParameters(0, KeyProperties.AUTH_BIOMETRIC_STRONG)
                     }
                     KeyKind.AGE -> {
-                        // KeyAgreement cannot be wrapped in a CryptoObject, so a
-                        // short post-auth window is the tightest option.
+                        // A KeyAgreement CryptoObject needs API 36 and
+                        // androidx.biometric 1.4.0-alpha06+; with compileSdk 35
+                        // and biometric 1.1.0, a short post-auth window is the
+                        // tightest option.
                         setUserAuthenticationParameters(AGE_AUTH_WINDOW_SECONDS, KeyProperties.AUTH_BIOMETRIC_STRONG)
                     }
                 }
@@ -149,6 +167,31 @@ class KeyStoreRepo(ctx: Context) {
                     append(HEX[b.toInt() and 0xf])
                 }
             }
+        }
+
+        /** DER of a named-curve P-256 SPKI up to and including the uncompressed-point tag 0x04. */
+        private val P256_SPKI_PREFIX = "3059301306072a8648ce3d020106082a8648ce3d03010703420004"
+            .chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+        private const val COORDINATE_BYTES = 32
+
+        /**
+         * Parses [spki] as `P256_SPKI_PREFIX || X || Y` and checks the point lies
+         * on the curve of [params] (y² = x³ + ax + b mod p), so that no
+         * invalid-curve point reaches the Keystore's ECDH.
+         */
+        fun p256PeerKey(spki: ByteArray, params: ECParameterSpec): ECPublicKey? {
+            val n = P256_SPKI_PREFIX.size
+            if (spki.size != n + 2 * COORDINATE_BYTES || !spki.copyOfRange(0, n).contentEquals(P256_SPKI_PREFIX)) {
+                return null
+            }
+            val x = BigInteger(1, spki.copyOfRange(n, n + COORDINATE_BYTES))
+            val y = BigInteger(1, spki.copyOfRange(n + COORDINATE_BYTES, spki.size))
+            val curve = params.curve
+            val p = (curve.field as? ECFieldFp)?.p ?: return null
+            if (x >= p || y >= p) return null
+            val rhs = x.pow(3).add(curve.a.multiply(x)).add(curve.b).mod(p)
+            if (y.multiply(y).mod(p) != rhs) return null
+            return KeyFactory.getInstance("EC").generatePublic(ECPublicKeySpec(ECPoint(x, y), params)) as ECPublicKey
         }
 
         /** OpenSSH-style `SHA256:<base64 without padding>` fingerprint of SPKI DER. */

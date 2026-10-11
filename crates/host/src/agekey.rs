@@ -2,7 +2,7 @@
 //! by age-plugin-yubikey and Secure Enclave plugins, so files are
 //! interoperable across those hardware backends).
 
-use age_core::format::{Stanza, FILE_KEY_BYTES};
+use age_core::format::{FileKey, Stanza, FILE_KEY_BYTES};
 use age_core::primitives::{aead_decrypt, aead_encrypt, hkdf};
 use anyhow::{anyhow, bail, Result};
 use base64::prelude::{Engine, BASE64_STANDARD_NO_PAD};
@@ -13,6 +13,7 @@ use p256::pkcs8::{DecodePublicKey, EncodePublicKey};
 use p256::PublicKey;
 use rand::rngs::OsRng;
 use sha2::{Digest, Sha256};
+use zeroize::Zeroizing;
 
 pub const PLUGIN_NAME: &str = "phone";
 pub const RECIPIENT_HRP: &str = "age1phone";
@@ -93,11 +94,11 @@ impl Recipient {
     }
 }
 
-fn wrap_key(epk: &[u8; POINT_BYTES], rpk: &[u8; POINT_BYTES], shared_x: &[u8]) -> [u8; 32] {
+fn wrap_key(epk: &[u8; POINT_BYTES], rpk: &[u8; POINT_BYTES], shared_x: &[u8]) -> Zeroizing<[u8; 32]> {
     let mut salt = [0u8; 2 * POINT_BYTES];
     salt[..POINT_BYTES].copy_from_slice(epk);
     salt[POINT_BYTES..].copy_from_slice(rpk);
-    hkdf(&salt, STANZA_KEY_LABEL, shared_x)
+    Zeroizing::new(hkdf(&salt, STANZA_KEY_LABEL, shared_x))
 }
 
 /// A reference to a key on the phone. Encoded as `AGE-PLUGIN-PHONE-1…`; the
@@ -150,14 +151,16 @@ impl Identity {
 
     /// Recovers the file key given the ECDH result from the phone for the
     /// stanza's ephemeral key (see [`ParsedStanza::ephemeral_spki`]).
-    pub fn unwrap(&self, stanza: &ParsedStanza, shared_x: &[u8]) -> Result<[u8; FILE_KEY_BYTES]> {
+    pub fn unwrap(&self, stanza: &ParsedStanza, shared_x: &[u8]) -> Result<FileKey> {
         if shared_x.len() != 32 {
             bail!("expected a 32-byte shared secret, got {} bytes", shared_x.len());
         }
         let key = wrap_key(&stanza.epk, &compressed(&self.recipient.0), shared_x);
-        let pt = aead_decrypt(&key, FILE_KEY_BYTES, &stanza.body)
-            .map_err(|_| anyhow!("file key decryption failed"))?;
-        Ok(pt.as_slice().try_into().expect("aead_decrypt checked the length"))
+        let pt = Zeroizing::new(
+            aead_decrypt(&key, FILE_KEY_BYTES, &stanza.body)
+                .map_err(|_| anyhow!("file key decryption failed"))?,
+        );
+        Ok(FileKey::init_with_mut(|fk| fk.copy_from_slice(&pt)))
     }
 }
 
@@ -201,6 +204,7 @@ impl ParsedStanza {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use age_core::secrecy::ExposeSecret;
     use p256::SecretKey;
 
     fn phone_key() -> (SecretKey, Recipient) {
@@ -255,7 +259,7 @@ mod tests {
         let parsed = ParsedStanza::parse(&stanza).unwrap().expect("piv-p256 stanza");
         assert!(identity.matches(&parsed));
         let shared = phone_ecdh(&sk, &parsed.ephemeral_spki());
-        assert_eq!(identity.unwrap(&parsed, &shared).unwrap(), file_key);
+        assert_eq!(identity.unwrap(&parsed, &shared).unwrap().expose_secret(), &file_key);
 
         // A different phone key neither matches nor decrypts.
         let (other_sk, other_recipient) = phone_key();

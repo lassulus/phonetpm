@@ -18,6 +18,68 @@ pub const ALPN: &[u8] = b"phonetpm/1";
 /// ECDH is a single point).
 pub const MAX_FRAME: usize = 64 * 1024;
 
+/// Maximum length (in chars) of a request description shown on the phone.
+pub const MAX_DESCRIPTION_CHARS: usize = 200;
+
+/// Maximum length (in chars) of a host or key name shown on the phone.
+pub const MAX_NAME_CHARS: usize = 64;
+
+/// Make peer-supplied text safe to display: drops control (Cc) and format
+/// (Cf: bidi overrides/isolates, zero-width chars, ...) characters, collapses
+/// whitespace runs (including newlines) to one space, trims, and truncates
+/// to `max_chars` chars, ending in '…' when truncated.
+pub fn sanitize_text(s: &str, max_chars: usize) -> String {
+    let mut out = String::new();
+    let mut pending_space = false;
+    for c in s.chars() {
+        if c.is_whitespace() {
+            pending_space = !out.is_empty();
+        } else if !is_control_or_format(c) {
+            if pending_space {
+                out.push(' ');
+                pending_space = false;
+            }
+            out.push(c);
+        }
+    }
+    if out.chars().count() <= max_chars {
+        return out;
+    }
+    let mut cut: String = out.chars().take(max_chars.saturating_sub(1)).collect();
+    cut.truncate(cut.trim_end().len());
+    cut.push('…');
+    cut
+}
+
+/// Unicode general categories Cc and Cf (Cf list per Unicode 15.1).
+fn is_control_or_format(c: char) -> bool {
+    c.is_control()
+        || matches!(
+            c,
+            '\u{00AD}'
+                | '\u{0600}'..='\u{0605}'
+                | '\u{061C}'
+                | '\u{06DD}'
+                | '\u{070F}'
+                | '\u{0890}'..='\u{0891}'
+                | '\u{08E2}'
+                | '\u{180E}'
+                | '\u{200B}'..='\u{200F}'
+                | '\u{202A}'..='\u{202E}'
+                | '\u{2060}'..='\u{2064}'
+                | '\u{2066}'..='\u{206F}'
+                | '\u{FEFF}'
+                | '\u{FFF9}'..='\u{FFFB}'
+                | '\u{110BD}'
+                | '\u{110CD}'
+                | '\u{13430}'..='\u{1343F}'
+                | '\u{1BCA0}'..='\u{1BCA3}'
+                | '\u{1D173}'..='\u{1D17A}'
+                | '\u{E0001}'
+                | '\u{E0020}'..='\u{E007F}'
+        )
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum KeyKind {
     /// ECDSA P-256 signing key, exposed as `ecdsa-sha2-nistp256` via ssh-agent.
@@ -44,7 +106,8 @@ pub enum Request {
     Pair { host_name: String },
     ListKeys,
     /// Sign `data` with the P-256 key `key_id` (SHA256withECDSA).
-    Sign { key_id: String, data: Vec<u8> },
+    /// `description` is free text from the requester, shown on the phone.
+    Sign { key_id: String, data: Vec<u8>, description: Option<String> },
     /// ECDH between key `key_id` and `peer_public_key` (SPKI DER). Returns the
     /// raw 32-byte x-coordinate of the shared point. `description` is free text
     /// from the requester, shown on the phone next to the key.
@@ -125,7 +188,7 @@ mod tests {
 
     #[test]
     fn roundtrip() {
-        let req = Request::Sign { key_id: "k1".into(), data: vec![1, 2, 3] };
+        let req = Request::Sign { key_id: "k1".into(), data: vec![1, 2, 3], description: None };
         let bytes = encode(&req).unwrap();
         let len = u32::from_be_bytes(bytes[..4].try_into().unwrap());
         assert_eq!(check_len(len).unwrap(), bytes.len() - 4);
@@ -142,5 +205,27 @@ mod tests {
             let bytes = encode(&resp).unwrap();
             assert_eq!(decode::<Response>(&bytes[4..]).unwrap(), resp);
         }
+    }
+
+    #[test]
+    fn sanitize_strips_bidi_and_zero_width() {
+        assert_eq!(sanitize_text("ab\u{202E}cd\u{200B}ef\u{2066}g\u{FEFF}", 64), "abcdefg");
+    }
+
+    #[test]
+    fn sanitize_collapses_whitespace_and_controls() {
+        assert_eq!(sanitize_text("  git\r\n\n push \t origin\x1b[31m ", 64), "git push origin[31m");
+    }
+
+    #[test]
+    fn sanitize_truncates_on_char_boundary() {
+        assert_eq!(sanitize_text("äöüäöü", 6), "äöüäöü");
+        assert_eq!(sanitize_text("äöüäöüx", 6), "äöüäö…");
+        assert_eq!(sanitize_text("ab cd", 4), "ab…");
+    }
+
+    #[test]
+    fn sanitize_empty_result() {
+        assert_eq!(sanitize_text("\u{202E}\n\u{200B} \x07", 10), "");
     }
 }

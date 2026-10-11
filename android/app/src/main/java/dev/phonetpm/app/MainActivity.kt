@@ -44,6 +44,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
@@ -73,6 +74,7 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import uniffi.phonetpm_mobile.KeyKind
@@ -233,7 +235,7 @@ private fun HomeTab(app: App) {
                 modifier = Modifier.size(240.dp).align(Alignment.CenterHorizontally),
             )
         }
-        Text("On the host, run:", style = MaterialTheme.typography.titleMedium)
+        Text("To pair, tap Pair new host in the Hosts tab, then run on the host:", style = MaterialTheme.typography.titleMedium)
         Text(
             "phonetpm pair $endpointId",
             fontFamily = FontFamily.Monospace,
@@ -267,7 +269,7 @@ private fun KeysTab(app: App, snackbar: SnackbarHostState) {
                     .padding(horizontal = 16.dp, vertical = 12.dp),
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text(key.label, style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
+                    Text(sanitizeText(key.label, MAX_NAME_CHARS), style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
                     AssistChip(onClick = {}, label = { Text(key.kind.name) })
                     if (key.strongBox) AssistChip(onClick = {}, label = { Text("StrongBox") })
                 }
@@ -281,7 +283,7 @@ private fun KeysTab(app: App, snackbar: SnackbarHostState) {
         AlertDialog(
             onDismissRequest = { toDelete = null },
             title = { Text("Delete key?") },
-            text = { Text("${key.label} will be removed from the Keystore. Hosts using it will lose access.") },
+            text = { Text("${sanitizeText(key.label, MAX_NAME_CHARS)} will be removed from the Keystore. Hosts using it will lose access.") },
             confirmButton = {
                 TextButton(onClick = {
                     toDelete = null
@@ -328,7 +330,8 @@ private fun CreateKeyDialog(onDismiss: () -> Unit, onCreate: (String, KeyKind) -
             }
         },
         confirmButton = {
-            Button(enabled = label.isNotBlank(), onClick = { onCreate(label.trim(), kind) }) { Text("Create") }
+            val clean = sanitizeText(label, MAX_NAME_CHARS)
+            Button(enabled = clean.isNotEmpty(), onClick = { onCreate(clean, kind) }) { Text("Create") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
     )
@@ -340,9 +343,10 @@ private fun HostsTab(app: App) {
     var toRemove by remember { mutableStateOf<PairedHost?>(null) }
     val dateFormat = remember { DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT) }
 
+    PairingSection(app)
     if (hosts.isEmpty()) {
         Text(
-            "No paired hosts. Run `phonetpm pair <endpoint id>` on a host.",
+            "No paired hosts.",
             modifier = Modifier.padding(16.dp),
             style = MaterialTheme.typography.bodyMedium,
         )
@@ -354,7 +358,7 @@ private fun HostsTab(app: App) {
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Column(Modifier.weight(1f)) {
-                    Text(host.hostName, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Medium)
+                    Text(sanitizeText(host.hostName, MAX_NAME_CHARS), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Medium)
                     Text(host.peerId, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
                     Text("Paired ${dateFormat.format(Date(host.pairedAt))}", style = MaterialTheme.typography.bodySmall)
                 }
@@ -370,16 +374,62 @@ private fun HostsTab(app: App) {
         AlertDialog(
             onDismissRequest = { toRemove = null },
             title = { Text("Remove host?") },
-            text = { Text("${host.hostName} will need to pair again.") },
+            text = { Text("${sanitizeText(host.hostName, MAX_NAME_CHARS)} will need to pair again. Its pending requests are denied.") },
             confirmButton = {
                 TextButton(onClick = {
                     app.hosts.remove(host.peerId)
+                    RequestBroker.denyFrom(host.peerId)
                     toRemove = null
                 }) { Text("Remove") }
             },
             dismissButton = { TextButton(onClick = { toRemove = null }) { Text("Cancel") } },
         )
     }
+}
+
+/** "Pair new host" button, or the open pairing window with its countdown. */
+@Composable
+private fun PairingSection(app: App) {
+    val ctx = LocalContext.current
+    val closesAt by PairingWindow.closesAt.collectAsStateWithLifecycle()
+    val remainingMs by produceState(PairingWindow.remainingMs(), closesAt) {
+        value = PairingWindow.remainingMs()
+        while (value > 0) {
+            delay(1000)
+            value = PairingWindow.remainingMs()
+        }
+    }
+
+    Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        if (remainingMs > 0) {
+            val seconds = (remainingMs + 999) / 1000
+            Text("Pairing open, %d:%02d left".format(seconds / 60, seconds % 60), style = MaterialTheme.typography.titleMedium)
+            Text("On the new host, run:", style = MaterialTheme.typography.bodyMedium)
+            Text(
+                "phonetpm pair ${app.identity.endpointId}",
+                fontFamily = FontFamily.Monospace,
+                style = MaterialTheme.typography.bodySmall,
+            )
+            if (!app.identity.serviceEnabled) {
+                Text(
+                    "Turn on Listen for hosts on the Home tab, or the host cannot reach this phone.",
+                    color = MaterialTheme.colorScheme.error,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+            OutlinedButton(onClick = { PairingWindow.close() }) { Text("Close") }
+        } else {
+            Button(onClick = {
+                PairingWindow.open()
+                if (app.identity.serviceEnabled) NodeService.start(ctx)
+            }) { Text("Pair new host") }
+            Text(
+                "Hosts can ask to pair only within 2 minutes after you tap this.",
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
+    }
+    HorizontalDivider()
 }
 
 @Composable
@@ -411,8 +461,15 @@ private fun HistoryTab(app: App) {
                         MaterialTheme.colorScheme.error
                     },
                 )
-                Text("Key ${e.keyLabel} · ${e.hostName}", style = MaterialTheme.typography.bodyMedium)
-                e.description?.let { Text(it, style = MaterialTheme.typography.bodyMedium) }
+                val host = if (e.peerId.isEmpty()) sanitizeText(e.hostName, MAX_NAME_CHARS) else hostLabel(e.hostName, e.peerId)
+                val key = sanitizeText(e.keyLabel, MAX_NAME_CHARS)
+                Text(if (key.isEmpty()) host else "Key $key · $host", style = MaterialTheme.typography.bodyMedium)
+                e.description?.let {
+                    Text(
+                        "Description from host: ${sanitizeText(it, MAX_DESCRIPTION_CHARS)}",
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                }
                 Text(dateFormat.format(Date(e.at)), style = MaterialTheme.typography.bodySmall)
             }
             HorizontalDivider()

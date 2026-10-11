@@ -152,7 +152,11 @@ impl Push {
     fn new(endpoint: Option<String>) -> Result<Self> {
         // reqwest is built without a default provider; iroh already uses ring.
         let _ = rustls::crypto::ring::default_provider().install_default();
+        let endpoint = endpoint.and_then(checked_push_url);
+        // No redirects: the phone chooses the URL, it must not be able to
+        // bounce the host's POST elsewhere.
         let http = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
             .timeout(PUSH_TIMEOUT)
             .build()
             .context("building HTTP client")?;
@@ -189,8 +193,10 @@ impl Push {
             Err(e) => Err(e.into()),
         };
         let new = match resp {
-            Ok(Response::PushEndpoint(new)) => new,
-            Ok(other) => return debug!("unexpected response to PushEndpoint: {other:?}"),
+            Ok(Response::PushEndpoint(new)) => new.and_then(checked_push_url),
+            Ok(other) => {
+                return debug!("unexpected response to PushEndpoint: {}", response_kind(&other))
+            }
             Err(e) => return debug!("phone did not report a push endpoint: {e:#}"),
         };
         {
@@ -200,7 +206,7 @@ impl Push {
             }
             cur.clone_from(&new);
         }
-        info!(endpoint = ?new, "phone push endpoint changed");
+        info!(present = new.is_some(), "phone push endpoint changed");
         let saved = config::load_config().and_then(|mut cfg| {
             cfg.push_endpoint = new;
             config::save_config(&cfg)
@@ -208,6 +214,33 @@ impl Push {
         if let Err(e) = saved {
             warn!("saving push endpoint: {e:#}");
         }
+    }
+}
+
+/// Accepts a push endpoint only if it is an `https` URL; anything else is
+/// dropped (and never POSTed to). The URL itself is not logged.
+pub fn checked_push_url(url: String) -> Option<String> {
+    match reqwest::Url::parse(&url) {
+        Ok(u) if u.scheme() == "https" && u.host().is_some() => Some(url),
+        _ => {
+            warn!("ignoring push endpoint from the phone: not an https URL");
+            None
+        }
+    }
+}
+
+/// Variant name of a response, for logs and errors that must not carry the
+/// payload.
+pub fn response_kind(resp: &Response) -> &'static str {
+    match resp {
+        Response::Paired { .. } => "Paired",
+        Response::Keys(_) => "Keys",
+        Response::Signature(_) => "Signature",
+        Response::SharedSecret(_) => "SharedSecret",
+        Response::Denied => "Denied",
+        Response::UnknownKey => "UnknownKey",
+        Response::Error(_) => "Error",
+        Response::PushEndpoint(_) => "PushEndpoint",
     }
 }
 
@@ -222,7 +255,8 @@ async fn roundtrip(conn: &Connection, frame: &[u8]) -> Result<Response> {
         let mut body = vec![0u8; len];
         recv.read_exact(&mut body).await.context("reading response body")?;
         let resp: Response = proto::decode(&body)?;
-        debug!(?resp, "phone response");
+        // Never log payloads: they carry signatures, shared secrets, push URLs.
+        debug!(response = response_kind(&resp), len, "phone response");
         Ok(resp)
     })
     .await

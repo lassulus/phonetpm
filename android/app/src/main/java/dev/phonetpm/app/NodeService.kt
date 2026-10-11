@@ -36,7 +36,9 @@ class NodeService : Service() {
     private val idleCheck = object : Runnable {
         override fun run() {
             val idle = SystemClock.elapsedRealtime() - lastActivity
-            if (App.of(this@NodeService).push.onDemand && inFlight.get() == 0 && idle >= IDLE_MS) {
+            // A new host has no push endpoint yet: stay up while it may pair.
+            val busy = inFlight.get() > 0 || PairingWindow.isOpen()
+            if (App.of(this@NodeService).push.onDemand && !busy && idle >= IDLE_MS) {
                 Log.i(TAG, "idle, stopping until the next wake push")
                 stopSelf()
             } else {

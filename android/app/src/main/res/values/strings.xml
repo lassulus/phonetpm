@@ -3,10 +3,12 @@
     <string name="app_name">phonetpm</string>
     <string name="channel_service">Service status</string>
     <string name="channel_requests">Approval requests</string>
+    <string name="channel_pairing">Pairing requests</string>
     <string name="notif_listening">phonetpm listening — %1$s</string>
     <string name="notif_starting">phonetpm starting…</string>
     <string name="notif_request_title">phonetpm request</string>
     <string name="notif_request_pair">Pairing request from %1$s</string>
     <string name="notif_request_sign">SSH signature with %1$s for %2$s</string>
     <string name="notif_request_ecdh">age decrypt with %1$s for %2$s</string>
+    <string name="notif_request_description">Description from host: %1$s</string>
 </resources>

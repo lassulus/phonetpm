@@ -1,5 +1,7 @@
 //! In-memory stand-in for the Android app: runs the real iroh node with
 //! software P-256 keys and auto-approves everything. For smoke tests only.
+//! Like the app's pairing window, pairing is open until the first host pairs;
+//! after that, unpaired peers are dropped right after the handshake.
 //!
 //! Usage: `cargo run -p phonetpm-mobile --example fake_phone` and pass the
 //! printed endpoint id to `phonetpm pair`.
@@ -64,7 +66,7 @@ impl Handler for FakePhone {
             Request::ListKeys => {
                 Response::Keys { keys: self.keys.iter().map(|k| k.info.clone()).collect() }
             }
-            Request::Sign { key_id, data } => match self.key(&key_id) {
+            Request::Sign { key_id, data, .. } => match self.key(&key_id) {
                 Some(k) if k.info.kind == KeyKind::Ssh => {
                     let sig: Signature = SigningKey::from(&k.secret).sign(&data);
                     Response::Signature { der: sig.to_der().as_bytes().to_vec() }
@@ -86,6 +88,12 @@ impl Handler for FakePhone {
                 None => Response::UnknownKey,
             },
         }
+    }
+
+    /// Mirrors the app: paired peers, or anyone while nobody is paired yet.
+    fn accepts_peer(&self, peer_id: String) -> bool {
+        let paired = self.paired.lock();
+        paired.is_empty() || paired.contains(&peer_id)
     }
 }
 
