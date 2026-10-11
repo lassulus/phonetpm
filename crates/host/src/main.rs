@@ -12,7 +12,7 @@ use tracing::{error, info};
 use phonetpm::agekey::{Identity, Recipient};
 use phonetpm::config::{self, Config};
 use phonetpm::control;
-use phonetpm::proto::{KeyInfo, KeyKind, Request, Response};
+use phonetpm::proto::{self, KeyInfo, KeyKind, Request, Response};
 use phonetpm::sshagent::{self, Agent};
 use phonetpm::transport::{self, Phone};
 
@@ -29,6 +29,9 @@ enum Cmd {
     Pair {
         /// The phone's endpoint id, as shown in the app.
         phone: EndpointId,
+        /// Name the phone shows for this host (default: user@hostname).
+        #[arg(long)]
+        name: Option<String>,
     },
     /// Run the daemon serving the ssh-agent and control sockets.
     Daemon,
@@ -44,7 +47,7 @@ fn main() -> Result<()> {
         .with_writer(std::io::stderr)
         .init();
     match Cli::parse().cmd {
-        Cmd::Pair { phone } => runtime()?.block_on(pair(phone)),
+        Cmd::Pair { phone, name } => runtime()?.block_on(pair(phone, name)),
         Cmd::Daemon => {
             let activated = activated_sockets()?;
             runtime()?.block_on(daemon(activated))
@@ -74,9 +77,39 @@ fn hostname() -> String {
     if name.is_empty() { "host".to_owned() } else { name }
 }
 
-async fn pair(phone_id: EndpointId) -> Result<()> {
+/// The login name of the current uid, falling back to `$USER`.
+fn username() -> String {
+    // SAFETY: passwd is plain data; all-zero is a valid (empty) value.
+    let mut pw: libc::passwd = unsafe { std::mem::zeroed() };
+    let mut buf = [0 as libc::c_char; 1024];
+    let mut res = std::ptr::null_mut();
+    // SAFETY: pw, buf and res are valid for the call; on success pw_name points into buf.
+    let rc = unsafe { libc::getpwuid_r(libc::getuid(), &mut pw, buf.as_mut_ptr(), buf.len(), &mut res) };
+    if rc == 0 && !res.is_null() && !pw.pw_name.is_null() {
+        // SAFETY: pw_name is a NUL-terminated string inside buf.
+        let name = unsafe { std::ffi::CStr::from_ptr(pw.pw_name) }.to_string_lossy().into_owned();
+        if !name.is_empty() {
+            return name;
+        }
+    }
+    std::env::var("USER").unwrap_or_default()
+}
+
+/// The name sent when pairing: `--name`, else `user@hostname`.
+fn pair_name(name: Option<String>) -> String {
+    let name = name.unwrap_or_else(|| match username() {
+        user if user.is_empty() => hostname(),
+        user => format!("{user}@{}", hostname()),
+    });
+    proto::sanitize_text(&name, proto::MAX_NAME_CHARS)
+}
+
+async fn pair(phone_id: EndpointId, name: Option<String>) -> Result<()> {
+    let host_name = pair_name(name);
+    if host_name.is_empty() {
+        bail!("--name must not be empty");
+    }
     let secret = config::load_or_create_secret()?;
-    let host_name = hostname();
     let mut cfg = Config { phone: phone_id.to_string(), host_name: host_name.clone(), push_endpoint: None };
     config::save_config(&cfg)?;
     let endpoint = transport::bind(secret).await?;

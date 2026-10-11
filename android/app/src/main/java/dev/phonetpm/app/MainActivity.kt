@@ -30,6 +30,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.DateRange
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Person
@@ -341,6 +342,7 @@ private fun CreateKeyDialog(onDismiss: () -> Unit, onCreate: (String, KeyKind) -
 private fun HostsTab(app: App) {
     val hosts by app.hosts.all.collectAsStateWithLifecycle()
     var toRemove by remember { mutableStateOf<PairedHost?>(null) }
+    var toRename by remember { mutableStateOf<PairedHost?>(null) }
     val dateFormat = remember { DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT) }
 
     PairingSection(app)
@@ -361,6 +363,9 @@ private fun HostsTab(app: App) {
                     Text(sanitizeText(host.hostName, MAX_NAME_CHARS), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Medium)
                     Text(host.peerId, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.bodySmall)
                     Text("Paired ${dateFormat.format(Date(host.pairedAt))}", style = MaterialTheme.typography.bodySmall)
+                }
+                IconButton(onClick = { toRename = host }) {
+                    Icon(Icons.Default.Edit, contentDescription = "Rename host")
                 }
                 IconButton(onClick = { toRemove = host }) {
                     Icon(Icons.Default.Delete, contentDescription = "Remove host")
@@ -385,6 +390,40 @@ private fun HostsTab(app: App) {
             dismissButton = { TextButton(onClick = { toRemove = null }) { Text("Cancel") } },
         )
     }
+
+    toRename?.let { host ->
+        RenameHostDialog(
+            current = sanitizeText(host.hostName, MAX_NAME_CHARS),
+            onDismiss = { toRename = null },
+            onRename = { name ->
+                app.hosts.rename(host.peerId, name)
+                toRename = null
+            },
+        )
+    }
+}
+
+/** Display-only: the new name shows in prompts and history; the host keeps its own. */
+@Composable
+private fun RenameHostDialog(current: String, onDismiss: () -> Unit, onRename: (String) -> Unit) {
+    var name by remember { mutableStateOf(current) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Rename host") },
+        text = {
+            OutlinedTextField(
+                value = name,
+                onValueChange = { name = it },
+                label = { Text("Name") },
+                singleLine = true,
+            )
+        },
+        confirmButton = {
+            val clean = sanitizeText(name, MAX_NAME_CHARS)
+            Button(enabled = clean.isNotEmpty(), onClick = { onRename(clean) }) { Text("Rename") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
 }
 
 /** "Pair new host" button, or the open pairing window with its countdown. */

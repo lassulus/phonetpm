@@ -25,6 +25,12 @@ class PairedHosts(ctx: Context) {
         save(next)
     }
 
+    /** Local, display-only name change; the host is not told. */
+    @Synchronized
+    fun rename(peerId: String, hostName: String) {
+        save(state.value.map { if (it.peerId == peerId) it.copy(hostName = hostName) else it })
+    }
+
     @Synchronized
     fun remove(peerId: String) {
         save(state.value.filterNot { it.peerId == peerId })

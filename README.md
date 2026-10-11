@@ -73,7 +73,10 @@ access limited to people you would trust with the signing key.
    minutes; outside that window pairing requests are refused without any UI.
 3. On the host: `phonetpm pair <endpoint id shown in the app>`. The phone shows
    the host's id: approve only if it matches the `this host:` line, then confirm
-   with your fingerprint or screen lock.
+   with your fingerprint or screen lock. The phone shows the host as
+   `user@hostname`; pick another name with `phonetpm pair --name <name> <id>`,
+   or rename it later in the Hosts tab (pencil icon). Renaming only changes
+   what the phone displays in prompts and new history entries.
 4. `phonetpm daemon &` then export the `SSH_AUTH_SOCK` printed by `phonetpm pair`.
    Sockets live in a private per-user directory: `$XDG_RUNTIME_DIR/phonetpm` on
    Linux (or `/tmp/phonetpm-$UID` without it), the per-user temp dir on macOS.
