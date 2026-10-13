@@ -84,7 +84,8 @@ impl Phone {
         let conn = match push.endpoint() {
             None => self.connect_once(CONNECT_TIMEOUT).await?,
             Some(url) => {
-                if let Err(e) = push.wake(&url).await {
+                let pushed = push.wake(&url).await;
+                if let Err(e) = &pushed {
                     warn!("wake push failed ({e:#}); trying to connect anyway");
                 }
                 let deadline = Instant::now() + WAKE_CONNECT_TIMEOUT;
@@ -96,7 +97,14 @@ impl Phone {
                             debug!("phone not up yet: {e:#}");
                             tokio::time::sleep(WAKE_RETRY).await;
                         }
-                        Err(e) => return Err(e.context("phone did not come up after the wake push")),
+                        Err(e) => {
+                            return Err(match pushed {
+                                Ok(()) => e.context("phone did not come up after the wake push"),
+                                Err(p) => e.context(format!(
+                                    "wake push failed: {p:#}; phone did not come up"
+                                )),
+                            })
+                        }
                     }
                 }
             }
@@ -154,9 +162,12 @@ impl Push {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let endpoint = endpoint.and_then(checked_push_url);
         // No redirects: the phone chooses the URL, it must not be able to
-        // bounce the host's POST elsewhere.
+        // bounce the host's POST elsewhere. No idle pooled connections: wakes
+        // are minutes apart and a pooled connection the server or a NAT
+        // dropped silently makes the next POST fail.
         let http = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
+            .pool_max_idle_per_host(0)
             .timeout(PUSH_TIMEOUT)
             .build()
             .context("building HTTP client")?;
@@ -169,9 +180,17 @@ impl Push {
 
     /// POSTs a wake message to the push endpoint. The body is a constant: the
     /// phone only needs to know someone wants to connect. `TTL`/`Urgency` are
-    /// the Web Push headers UnifiedPush servers understand.
+    /// the Web Push headers UnifiedPush servers understand. Retried once.
     async fn wake(&self, url: &str) -> Result<()> {
         info!("waking phone via push");
+        if let Err(e) = self.post_wake(url).await {
+            warn!("wake push failed ({e:#}); retrying once");
+            self.post_wake(url).await?;
+        }
+        Ok(())
+    }
+
+    async fn post_wake(&self, url: &str) -> Result<()> {
         self.http
             .post(url)
             .header("TTL", "60")
